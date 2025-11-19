@@ -1,2 +1,6 @@
-numpy>=1.21.0
-matplotlib>=3.4.0
+# CEJ 牙齿分析系统依赖
+# 注意：使用 NumPy 1.x 以保证与系统 matplotlib 兼容
+numpy>=1.21.0,<2.0.0
+opencv-python-headless>=4.5.0,<5.0.0
+matplotlib>=3.3.0,<4.0.0
+scipy>=1.5.0,<2.0.0
