@@ -3,7 +3,7 @@
 """
 牙齿CEJ线检测与根部距离测量系统
 基于全景X光片的牙齿分析，包括：
-1. 牙齿边缘检测和分割
+1. 牙齿边缘检测和分割（使用U-Net深度学习模型）
 2. CEJ线（釉牙骨质界）识别
 3. 基于CEJ线法线方向的深度测量
 """
@@ -18,6 +18,9 @@ from scipy import ndimage
 import os
 import glob
 from pathlib import Path
+
+# 导入U-Net分割模块
+from unet_segmentation import UNetTeethSegmentation
 
 # 配置matplotlib支持中文显示
 plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
@@ -34,6 +37,17 @@ class ToothCEJAnalyzer:
 
         # 像素到毫米的转换比例（需要根据实际X光片校准）
         self.pixels_per_mm = 10  # 默认值，可调整
+
+        # 初始化U-Net分割器
+        try:
+            self.unet_segmenter = UNetTeethSegmentation()
+            self.use_unet = True
+            print("✓ U-Net分割器已初始化")
+        except Exception as e:
+            print(f"⚠ U-Net分割器初始化失败: {e}")
+            print("  将使用传统方法（不推荐）")
+            self.unet_segmenter = None
+            self.use_unet = False
 
     def order_points(self, pts):
         """
@@ -90,6 +104,51 @@ class ToothCEJAnalyzer:
     def detect_teeth_contours(self, image):
         """
         检测牙齿轮廓
+        使用U-Net深度学习模型进行牙齿分割
+
+        参数:
+            image: 预处理后的图像或原始图像
+
+        返回:
+            teeth_data: 包含每颗牙齿信息的列表
+        """
+        if self.use_unet and self.unet_segmenter is not None:
+            # 使用U-Net深度学习方法（推荐）
+            return self._detect_teeth_with_unet(image)
+        else:
+            # 使用传统方法（已弃用，不推荐）
+            print("⚠ 警告：使用传统分割方法，效果可能不佳")
+            return self._detect_teeth_traditional(image)
+
+    def _detect_teeth_with_unet(self, image):
+        """
+        使用U-Net深度学习模型检测牙齿
+
+        参数:
+            image: 输入图像
+
+        返回:
+            teeth_data: 包含每颗牙齿信息的列表
+        """
+        # 使用U-Net进行分割
+        mask, refined_mask = self.unet_segmenter.segment_teeth(image)
+
+        # 提取单个牙齿
+        teeth_data = self.unet_segmenter.extract_individual_teeth(
+            refined_mask, min_area=500, max_area=50000
+        )
+
+        # 为每个牙齿添加排序后的box（确保兼容性）
+        for tooth in teeth_data:
+            if 'box' in tooth:
+                tooth['box'] = self.order_points(tooth['box'])
+
+        return teeth_data
+
+    def _detect_teeth_traditional(self, image):
+        """
+        使用传统方法检测牙齿轮廓（已弃用）
+        仅作为后备方案，不推荐使用
 
         参数:
             image: 预处理后的图像
@@ -444,7 +503,11 @@ class ToothCEJAnalyzer:
 
         # 检测牙齿轮廓
         print("正在检测牙齿轮廓...")
-        teeth_data = self.detect_teeth_contours(processed)
+        # 如果使用U-Net，传入原始图像；否则使用预处理后的图像
+        if self.use_unet:
+            teeth_data = self.detect_teeth_contours(original_image)
+        else:
+            teeth_data = self.detect_teeth_contours(processed)
         print(f"✓ 检测到 {len(teeth_data)} 颗牙齿")
 
         if len(teeth_data) == 0:
