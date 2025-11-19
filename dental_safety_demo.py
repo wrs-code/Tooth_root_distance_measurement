@@ -184,7 +184,7 @@ class SafetyZoneCalculator:
         violations = []
 
         # 在多个深度采样点检查
-        for depth_mm in [0, 3, 6, 9, 12]:
+        for depth_mm in [3, 5, 7, 9]:
             if depth_mm > total_depth:
                 break
 

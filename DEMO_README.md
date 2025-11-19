@@ -66,11 +66,11 @@ def calculate_trapezoid_safety_zone(root):
 ```
 
 ### 2. 多深度合规性检查
-不仅测量最短距离，还在多个关键深度（0, 3, 6, 9, 12mm）检查是否满足安全要求：
+不仅测量最短距离，还在多个关键深度（3, 5, 7, 9mm）检查是否满足安全要求：
 
 ```python
 violations = []
-for depth in [0, 3, 6, 9, 12]:
+for depth in [3, 5, 7, 9]:
     required_width = get_required_width_at_depth(depth)
     actual_distance = measure_at_depth(depth)
     if actual_distance < required_width:

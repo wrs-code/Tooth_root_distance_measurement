@@ -307,8 +307,8 @@ def create_concept_diagram():
     config = SafetyZoneConfig()
     calculator = SafetyZoneCalculator(config)
 
-    depths_to_show = [0, 3, 6, 9, 12]
-    colors_gradient = ['red', 'orange', 'yellow', 'lightgreen', 'green']
+    depths_to_show = [3, 5, 7, 9]
+    colors_gradient = ['red', 'orange', 'yellow', 'lightgreen']
 
     for i, depth in enumerate(depths_to_show):
         if depth > 12:
