@@ -105,13 +105,15 @@ class UNetTeethSegmentation:
 
         return binary_mask
 
-    def refine_mask(self, mask):
+    def refine_mask(self, mask, open_iteration=2, erode_iteration=1):
         """
         使用形态学操作细化掩码
-        参考开源仓库的CCA_Analysis后处理流程
+        与开源仓库CCA_Analysis.py完全一致的后处理流程
 
         参数:
             mask: 二值掩码
+            open_iteration: 开运算迭代次数（默认2）
+            erode_iteration: 腐蚀迭代次数（默认1）
 
         返回:
             refined: 细化后的掩码
@@ -122,7 +124,7 @@ class UNetTeethSegmentation:
 
         # 1. 形态学开运算去除小噪声（使用5x5核）
         kernel = np.ones((5, 5), np.uint8)
-        opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+        opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=open_iteration)
 
         # 2. 应用锐化滤波器增强边缘
         kernel_sharpening = np.array([[-1, -1, -1],
@@ -130,21 +132,18 @@ class UNetTeethSegmentation:
                                        [-1, -1, -1]])
         sharpened = cv2.filter2D(opened, -1, kernel_sharpening)
 
-        # 3. 轻微腐蚀以分离相邻牙齿
-        eroded = cv2.erode(sharpened, kernel, iterations=1)
+        # 3. 腐蚀以分离相邻牙齿
+        eroded = cv2.erode(sharpened, kernel, iterations=erode_iteration)
 
-        # 4. 形态学闭运算填充小孔
-        closed = cv2.morphologyEx(eroded, cv2.MORPH_CLOSE, kernel, iterations=1)
+        return eroded
 
-        return closed
-
-    def segment_teeth(self, image, auto_threshold=True):
+    def segment_teeth(self, image, threshold=0.5):
         """
         使用U-Net分割牙齿
 
         参数:
             image: 输入图像（BGR或灰度）
-            auto_threshold: 是否自动选择最佳阈值
+            threshold: 二值化阈值（默认0.5）
 
         返回:
             mask: 牙齿分割掩码（二值图像）
@@ -155,13 +154,6 @@ class UNetTeethSegmentation:
 
         # U-Net推理
         prediction = self.model.predict(processed, verbose=0)
-
-        # 自动选择阈值
-        if auto_threshold:
-            threshold = self._find_optimal_threshold(prediction)
-            print(f"  自动选择阈值: {threshold:.2f}")
-        else:
-            threshold = 0.5
 
         # 后处理
         mask = self.postprocess_mask(prediction, original_size, threshold=threshold)
@@ -240,20 +232,20 @@ class UNetTeethSegmentation:
 
         return optimal_threshold
 
-    def extract_individual_teeth(self, mask, min_area=500, max_area=50000):
+    def extract_individual_teeth(self, mask, min_area=2000):
         """
         从分割掩码中提取单个牙齿
         使用连通组件分析（CCA）
+        与开源仓库CCA_Analysis.py一致：面积阈值 > 2000
 
         参数:
             mask: 牙齿分割掩码
-            min_area: 最小牙齿面积（过滤噪声）
-            max_area: 最大牙齿面积
+            min_area: 最小牙齿面积（默认2000，与开源仓库一致）
 
         返回:
             teeth_data: 包含每颗牙齿信息的列表
         """
-        # 连通组件分析
+        # 连通组件分析（connectivity=8，与开源仓库一致）
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
             mask, connectivity=8
         )
@@ -265,8 +257,8 @@ class UNetTeethSegmentation:
             # 获取组件统计信息
             area = stats[label, cv2.CC_STAT_AREA]
 
-            # 过滤面积不合理的区域
-            if area < min_area or area > max_area:
+            # 面积过滤：与开源仓库一致（c_area > 2000）
+            if area <= min_area:
                 continue
 
             # 创建单个牙齿的掩码
@@ -284,11 +276,6 @@ class UNetTeethSegmentation:
 
             # 计算边界框
             x, y, w, h = cv2.boundingRect(contour)
-
-            # 过滤不合理的宽高比
-            aspect_ratio = float(w) / h if h > 0 else 0
-            if aspect_ratio > 2.0 or aspect_ratio < 0.2:
-                continue
 
             # 计算最小外接矩形
             rect = cv2.minAreaRect(contour)
