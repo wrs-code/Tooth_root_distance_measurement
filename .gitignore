@@ -22,3 +22,6 @@ ENV/
 .DS_Store
 Thumbs.db
 models/*.h5
+
+# 参考仓库（用于开发参考，不需要提交）
+open_source_ref/
