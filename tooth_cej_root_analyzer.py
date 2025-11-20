@@ -133,10 +133,29 @@ class ToothCEJAnalyzer:
         # 使用U-Net进行分割
         mask, refined_mask = self.unet_segmenter.segment_teeth(image)
 
-        # 提取单个牙齿
+        # 提取单个牙齿，先尝试默认参数
         teeth_data = self.unet_segmenter.extract_individual_teeth(
             refined_mask, min_area=500, max_area=50000
         )
+
+        # 如果没有检测到牙齿，尝试更宽松的参数
+        if len(teeth_data) == 0:
+            print("  未检测到牙齿，尝试调整参数...")
+            # 尝试更小的最小面积和更大的最大面积
+            teeth_data = self.unet_segmenter.extract_individual_teeth(
+                refined_mask, min_area=100, max_area=100000
+            )
+            if len(teeth_data) > 0:
+                print(f"  使用调整后的参数检测到 {len(teeth_data)} 颗牙齿")
+
+        # 如果还是没有检测到，尝试直接使用未细化的掩码
+        if len(teeth_data) == 0:
+            print("  尝试使用原始掩码...")
+            teeth_data = self.unet_segmenter.extract_individual_teeth(
+                mask, min_area=100, max_area=100000
+            )
+            if len(teeth_data) > 0:
+                print(f"  使用原始掩码检测到 {len(teeth_data)} 颗牙齿")
 
         # 为每个牙齿添加排序后的box（确保兼容性）
         for tooth in teeth_data:

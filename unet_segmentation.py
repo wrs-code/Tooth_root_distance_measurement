@@ -125,12 +125,13 @@ class UNetTeethSegmentation:
 
         return closed
 
-    def segment_teeth(self, image):
+    def segment_teeth(self, image, auto_threshold=True):
         """
         使用U-Net分割牙齿
 
         参数:
             image: 输入图像（BGR或灰度）
+            auto_threshold: 是否自动选择最佳阈值
 
         返回:
             mask: 牙齿分割掩码（二值图像）
@@ -142,13 +143,89 @@ class UNetTeethSegmentation:
         # U-Net推理
         prediction = self.model.predict(processed, verbose=0)
 
+        # 自动选择阈值
+        if auto_threshold:
+            threshold = self._find_optimal_threshold(prediction)
+            print(f"  自动选择阈值: {threshold:.2f}")
+        else:
+            threshold = 0.5
+
         # 后处理
-        mask = self.postprocess_mask(prediction, original_size, threshold=0.5)
+        mask = self.postprocess_mask(prediction, original_size, threshold=threshold)
 
         # 细化掩码
         refined_mask = self.refine_mask(mask)
 
         return mask, refined_mask
+
+    def _find_optimal_threshold(self, prediction):
+        """
+        自动寻找最佳二值化阈值
+
+        参数:
+            prediction: U-Net预测输出
+
+        返回:
+            optimal_threshold: 最佳阈值
+        """
+        pred_flat = prediction.flatten()
+
+        # 分析预测值分布
+        pred_mean = pred_flat.mean()
+        pred_std = pred_flat.std()
+        pred_max = pred_flat.max()
+
+        # 如果最大值很小，说明模型预测置信度很低
+        if pred_max < 0.3:
+            print(f"  警告：模型预测置信度很低 (max={pred_max:.3f})")
+            return 0.1  # 使用更低的阈值
+
+        # 如果预测值普遍较低
+        if pred_mean < 0.2:
+            return max(0.1, pred_mean + pred_std)
+
+        # 使用Otsu方法寻找最佳阈值
+        # 将预测值转换为0-255范围
+        pred_255 = (pred_flat * 255).astype(np.uint8)
+
+        # 计算直方图
+        hist, bin_edges = np.histogram(pred_255, bins=256, range=(0, 256))
+
+        # Otsu算法
+        total = len(pred_255)
+        sum_total = np.dot(np.arange(256), hist)
+
+        sum_background = 0
+        weight_background = 0
+        max_variance = 0
+        optimal_threshold_255 = 0
+
+        for t in range(256):
+            weight_background += hist[t]
+            if weight_background == 0:
+                continue
+
+            weight_foreground = total - weight_background
+            if weight_foreground == 0:
+                break
+
+            sum_background += t * hist[t]
+
+            mean_background = sum_background / weight_background
+            mean_foreground = (sum_total - sum_background) / weight_foreground
+
+            variance = weight_background * weight_foreground * (mean_background - mean_foreground) ** 2
+
+            if variance > max_variance:
+                max_variance = variance
+                optimal_threshold_255 = t
+
+        optimal_threshold = optimal_threshold_255 / 255.0
+
+        # 限制阈值范围
+        optimal_threshold = max(0.1, min(0.7, optimal_threshold))
+
+        return optimal_threshold
 
     def extract_individual_teeth(self, mask, min_area=500, max_area=50000):
         """
