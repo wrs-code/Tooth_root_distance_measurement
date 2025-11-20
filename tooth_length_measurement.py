@@ -92,7 +92,8 @@ class ToothLengthMeasurement:
             self.unet_segmenter = None
             self.use_unet = False
 
-    def CCA_Analysis(self, orig_image, predict_image, erode_iteration=2, open_iteration=2):
+    def CCA_Analysis(self, orig_image, predict_image, erode_iteration=2, open_iteration=2,
+                     debug_output_dir=None, image_name='image'):
         """
         连通组件分析 (CCA) - 提取牙齿轮廓并计算长短轴位置
 
@@ -101,6 +102,8 @@ class ToothLengthMeasurement:
             predict_image: 预测/分割后的图像
             erode_iteration: 腐蚀迭代次数
             open_iteration: 开运算迭代次数
+            debug_output_dir: debug图像输出目录（None则不保存）
+            image_name: 图像名称（用于debug文件命名）
 
         返回:
             result_image: 标注后的图像
@@ -110,21 +113,34 @@ class ToothLengthMeasurement:
         image = predict_image.copy()
         image2 = orig_image.copy()
 
+        # 保存debug图像的辅助函数
+        def save_debug_image(img, suffix, description):
+            if debug_output_dir is not None:
+                debug_path = os.path.join(debug_output_dir, f'{image_name}_debug_{suffix}.png')
+                cv2.imwrite(debug_path, img)
+                print(f"  ├─ {description}: {os.path.basename(debug_path)}")
+
+        # 保存UNet分割结果
+        save_debug_image(predict_image, '01_unet_segmentation', 'UNet分割结果')
+
         # 1. 形态学处理
         # 创建5x5卷积核
         kernel1 = np.ones((5, 5), np.uint8)
 
         # 开运算（先腐蚀后膨胀，用于去除噪声）
         image = cv2.morphologyEx(image, cv2.MORPH_OPEN, kernel1, iterations=open_iteration)
+        save_debug_image(image, '02_morphology_open', f'开运算(iter={open_iteration})')
 
         # 锐化滤波核
         kernel_sharpening = np.array([[-1, -1, -1],
                                       [-1,  9, -1],
                                       [-1, -1, -1]])
         image = cv2.filter2D(image, -1, kernel_sharpening)
+        save_debug_image(image, '03_sharpening', '锐化滤波')
 
         # 腐蚀操作
         image = cv2.erode(image, kernel1, iterations=erode_iteration)
+        save_debug_image(image, '04_erosion', f'腐蚀(iter={erode_iteration})')
 
         # 2. 转换为灰度图
         if len(image.shape) == 3:
@@ -132,12 +148,21 @@ class ToothLengthMeasurement:
 
         # 3. Otsu二值化
         thresh = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        save_debug_image(thresh, '05_otsu_threshold', 'Otsu二值化')
 
         # 4. 连通组件分析（8-连通）
         output = cv2.connectedComponentsWithStats(thresh, connectivity=8)
         num_labels = output[0]
         labels = output[1]
         stats = output[2]
+
+        # 创建连通组件标签的彩色可视化
+        labels_vis = np.zeros_like(orig_image)
+        for label in range(1, num_labels):
+            mask = (labels == label).astype(np.uint8) * 255
+            color = np.random.randint(0, 255, 3).tolist()
+            labels_vis[labels == label] = color
+        save_debug_image(labels_vis, '06_connected_components', f'连通组件分析({num_labels-1}个组件)')
 
         # 5. 遍历每个连通组件并保存牙齿数据
         teeth_data = []
@@ -247,6 +272,41 @@ class ToothLengthMeasurement:
                 }
                 teeth_data.append(tooth_info)
 
+                # 保存每个牙齿的单独debug图像
+                if debug_output_dir is not None:
+                    tooth_id = len(teeth_data)
+                    # 单独mask
+                    tooth_debug_path = os.path.join(debug_output_dir,
+                                                   f'{image_name}_debug_07_tooth_{tooth_id:02d}_mask.png')
+                    cv2.imwrite(tooth_debug_path, componentMask)
+
+                    # 轮廓+外接矩形
+                    tooth_vis = orig_image.copy()
+                    cv2.drawContours(tooth_vis, [c], -1, (0, 255, 0), 2)
+                    cv2.drawContours(tooth_vis, [box.astype("int")], -1, (255, 200, 0), 2)
+                    tooth_vis_path = os.path.join(debug_output_dir,
+                                                  f'{image_name}_debug_08_tooth_{tooth_id:02d}_contour.png')
+                    cv2.imwrite(tooth_vis_path, tooth_vis)
+
+                    # 轮廓+轴线
+                    tooth_axis = orig_image.copy()
+                    cv2.drawContours(tooth_axis, [c], -1, (0, 255, 0), 2)
+                    cv2.line(tooth_axis,
+                            (int(long_axis_start[0]), int(long_axis_start[1])),
+                            (int(long_axis_end[0]), int(long_axis_end[1])),
+                            (0, 0, 255), 3)
+                    cv2.circle(tooth_axis, (int(long_axis_start[0]), int(long_axis_start[1])), 5, (0, 0, 255), -1)
+                    cv2.circle(tooth_axis, (int(long_axis_end[0]), int(long_axis_end[1])), 5, (0, 0, 255), -1)
+                    cv2.line(tooth_axis,
+                            (int(short_axis_start[0]), int(short_axis_start[1])),
+                            (int(short_axis_end[0]), int(short_axis_end[1])),
+                            (255, 0, 0), 3)
+                    cv2.circle(tooth_axis, (int(short_axis_start[0]), int(short_axis_start[1])), 5, (255, 0, 0), -1)
+                    cv2.circle(tooth_axis, (int(short_axis_end[0]), int(short_axis_end[1])), 5, (255, 0, 0), -1)
+                    tooth_axis_path = os.path.join(debug_output_dir,
+                                                   f'{image_name}_debug_09_tooth_{tooth_id:02d}_axes.png')
+                    cv2.imwrite(tooth_axis_path, tooth_axis)
+
                 # 9. 可视化绘制
                 # 绘制完整的牙齿轮廓（绿色）
                 cv2.drawContours(image2, [c], -1, (0, 255, 0), 2)
@@ -293,6 +353,9 @@ class ToothLengthMeasurement:
                            (cX - 15, cY - 20), cv2.FONT_HERSHEY_SIMPLEX,
                            0.7, (0, 255, 255), 2)
 
+        # 保存最终结果
+        save_debug_image(image2, '10_final_result', f'最终结果(检测到{len(teeth_data)}颗牙齿)')
+
         return image2, teeth_data
 
     def analyze_single_image(self, image_path, output_dir='output'):
@@ -331,14 +394,21 @@ class ToothLengthMeasurement:
             _, predict_image = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             predict_image = cv2.bitwise_not(predict_image)
 
-        # 2. 执行CCA分析
+        # 2. 执行CCA分析（启用debug输出）
         print("正在进行连通组件分析（CCA）...")
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        os.makedirs(output_dir, exist_ok=True)
+
+        print(f"\n  Debug图像输出:")
         result_image, teeth_data = self.CCA_Analysis(
             original_image,
             predict_image,
             erode_iteration=2,
-            open_iteration=2
+            open_iteration=2,
+            debug_output_dir=output_dir,
+            image_name=base_name
         )
+        print()
 
         teeth_count = len(teeth_data)
         print(f"✓ 检测到 {teeth_count} 颗牙齿")
@@ -350,8 +420,6 @@ class ToothLengthMeasurement:
             print(f"    短轴: {tooth['short_axis']['length_mm']:.1f}mm, 位置: {tooth['short_axis']['start']} -> {tooth['short_axis']['end']}")
 
         # 3. 保存结果
-        os.makedirs(output_dir, exist_ok=True)
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
         output_path = os.path.join(output_dir, f'{base_name}_tooth_axis.png')
 
         cv2.imwrite(output_path, result_image)
