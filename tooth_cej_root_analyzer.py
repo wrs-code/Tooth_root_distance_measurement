@@ -410,112 +410,97 @@ class ToothCEJAnalyzer:
 
         return is_uniform and len(points) >= min_points, uniformity_score
 
-    def extract_uniform_edge_points(self, alveolar_image, teeth_group, convex_hull,
-                                    min_points=13, canny_low=50, canny_high=150):
+    def detect_roi_edges_simple(self, image, roi_mask, teeth_mask, convex_hull,
+                                canny_low=50, canny_high=150, debug_dir=None, jaw_name=''):
         """
-        从牙槽骨图像中提取均匀分布的CEJ边缘点
+        直接在凸包ROI中检测边缘，并移除牙齿内部的边缘点
+
+        新算法流程：
+        1. 在ROI区域内进行Canny边缘检测
+        2. 提取所有边缘点
+        3. 清除牙齿内部的边缘点（使用膨胀后的牙齿mask）
+        4. 返回剩余的边缘点
 
         参数:
-            alveolar_image: 牙槽骨图像（已删除牙齿）
-            teeth_group: 牙齿组
+            image: 原始图像（灰度或预处理后）
+            roi_mask: ROI区域掩码
+            teeth_mask: 牙齿区域掩码
             convex_hull: 凸包轮廓
-            min_points: 最小边缘点数
             canny_low: Canny低阈值
             canny_high: Canny高阈值
+            debug_dir: debug图像保存目录
+            jaw_name: 颌名称（用于debug文件命名）
 
         返回:
             edge_points: 边缘点列表 [(x, y), ...]
-            is_valid: 是否满足要求
+            debug_images: debug图像字典
         """
-        # 1. 使用Canny边缘检测
-        edges = cv2.Canny(alveolar_image, canny_low, canny_high)
+        debug_images = {}
+
+        # 1. 在ROI区域应用Canny边缘检测
+        print(f"    步骤1: 在ROI区域进行边缘检测...")
+        roi_image = cv2.bitwise_and(image, image, mask=roi_mask)
+        edges = cv2.Canny(roi_image, canny_low, canny_high)
+        debug_images['edges_raw'] = edges.copy()
 
         # 2. 形态学操作连接边缘
         kernel = np.ones((3, 3), np.uint8)
         edges = cv2.dilate(edges, kernel, iterations=1)
         edges = cv2.erode(edges, kernel, iterations=1)
+        debug_images['edges_morphology'] = edges.copy()
 
-        # 3. 确定CEJ搜索区域（在牙齿颈部附近）
-        # 计算所有牙齿的Y坐标范围
-        if len(teeth_group) == 0:
-            return [], False
+        # 3. 膨胀牙齿mask，创建排除区域
+        print(f"    步骤2: 创建牙齿排除区域...")
+        buffer_pixels = 5
+        kernel_dilate = np.ones((buffer_pixels*2+1, buffer_pixels*2+1), np.uint8)
+        dilated_teeth_mask = cv2.dilate(teeth_mask, kernel_dilate, iterations=1)
+        debug_images['teeth_mask_dilated'] = dilated_teeth_mask.copy()
 
-        all_y_coords = []
-        for tooth in teeth_group:
-            x, y, w, h = tooth['bbox']
-            # CEJ通常在牙齿的25%-60%高度范围内
-            cej_y_start = y + int(h * 0.25)
-            cej_y_end = y + int(h * 0.6)
-            all_y_coords.extend([cej_y_start, cej_y_end])
+        # 4. 从边缘中移除牙齿内部的点
+        print(f"    步骤3: 移除牙齿内部的边缘点...")
+        edges_outside_teeth = cv2.bitwise_and(edges, cv2.bitwise_not(dilated_teeth_mask))
+        debug_images['edges_filtered'] = edges_outside_teeth.copy()
 
-        if len(all_y_coords) == 0:
-            return [], False
+        # 5. 提取所有边缘点
+        edge_coords = np.column_stack(np.where(edges_outside_teeth > 0))  # (y, x)
+        edge_points = [(x, y) for y, x in edge_coords]
 
-        # 搜索区域的Y范围
-        search_y_min = min(all_y_coords)
-        search_y_max = max(all_y_coords)
+        print(f"    提取到 {len(edge_points)} 个边缘点")
 
-        # 4. 提取边缘点
-        edge_coords = np.column_stack(np.where(edges > 0))  # (y, x)
+        # 6. 保存debug图像（如果指定了目录）
+        if debug_dir is not None and jaw_name:
+            os.makedirs(debug_dir, exist_ok=True)
 
-        # 5. 筛选在搜索区域内的点
-        cej_candidate_points = []
-        for y, x in edge_coords:
-            if search_y_min <= y <= search_y_max:
-                cej_candidate_points.append((x, y))
+            # 保存ROI区域
+            roi_vis = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
+            cv2.drawContours(roi_vis, [convex_hull], -1, (0, 255, 0), 2)
+            cv2.imwrite(os.path.join(debug_dir, f'{jaw_name}_01_roi_region.png'), roi_vis)
 
-        if len(cej_candidate_points) < min_points:
-            print(f"    警告: 边缘点数不足 ({len(cej_candidate_points)} < {min_points})")
-            return cej_candidate_points, False
+            # 保存原始边缘
+            cv2.imwrite(os.path.join(debug_dir, f'{jaw_name}_02_edges_raw.png'),
+                       debug_images['edges_raw'])
 
-        # 6. 检查点的分布均匀性
-        is_valid, uniformity_score = self.check_point_distribution(cej_candidate_points, min_points)
+            # 保存形态学处理后的边缘
+            cv2.imwrite(os.path.join(debug_dir, f'{jaw_name}_03_edges_morphology.png'),
+                       debug_images['edges_morphology'])
 
-        print(f"    提取边缘点: {len(cej_candidate_points)} 个, 均匀性评分: {uniformity_score:.2f}")
+            # 保存膨胀后的牙齿mask
+            cv2.imwrite(os.path.join(debug_dir, f'{jaw_name}_04_teeth_mask_dilated.png'),
+                       dilated_teeth_mask)
 
-        # 7. 如果分布不均匀，尝试采样使其更均匀
-        if not is_valid and len(cej_candidate_points) >= min_points:
-            print("    分布不够均匀，尝试重新采样...")
-            # 按X坐标排序
-            sorted_points = sorted(cej_candidate_points, key=lambda p: p[0])
+            # 保存过滤后的边缘
+            cv2.imwrite(os.path.join(debug_dir, f'{jaw_name}_05_edges_filtered.png'),
+                       edges_outside_teeth)
 
-            # 计算X范围
-            x_min = sorted_points[0][0]
-            x_max = sorted_points[-1][0]
-            x_range = x_max - x_min
+            # 保存边缘点可视化
+            edge_vis = cv2.cvtColor(roi_image, cv2.COLOR_GRAY2BGR)
+            for x, y in edge_points:
+                cv2.circle(edge_vis, (x, y), 2, (0, 255, 255), -1)
+            cv2.imwrite(os.path.join(debug_dir, f'{jaw_name}_06_edge_points.png'), edge_vis)
 
-            if x_range > 0:
-                # 将X范围分成bins，每个bin取一个代表点
-                num_bins = max(min_points, len(cej_candidate_points) // 3)
-                bin_width = x_range / num_bins
+            print(f"    Debug图像已保存到: {debug_dir}")
 
-                resampled_points = []
-                for i in range(num_bins):
-                    bin_x_min = x_min + i * bin_width
-                    bin_x_max = x_min + (i + 1) * bin_width
-
-                    # 找到该bin内的所有点
-                    bin_points = [p for p in sorted_points if bin_x_min <= p[0] < bin_x_max]
-
-                    if bin_points:
-                        # 取该bin的中位数点
-                        mid_idx = len(bin_points) // 2
-                        resampled_points.append(bin_points[mid_idx])
-
-                # 再次检查分布
-                is_valid_resampled, uniformity_score_resampled = self.check_point_distribution(
-                    resampled_points, min_points)
-
-                if is_valid_resampled:
-                    print(f"    重新采样成功: {len(resampled_points)} 个点, 均匀性: {uniformity_score_resampled:.2f}")
-                    return resampled_points, True
-                else:
-                    # 即使不够均匀，如果点数足够，也可以使用
-                    if len(resampled_points) >= min_points:
-                        print(f"    使用重采样点 (均匀性欠佳)")
-                        return resampled_points, True
-
-        return cej_candidate_points, is_valid
+        return edge_points, debug_images
 
     def detect_cej_points_in_roi(self, image, teeth_group, roi_bbox, teeth_mask):
         """
@@ -688,101 +673,150 @@ class ToothCEJAnalyzer:
             fitted_curve = [(int(x), int(y)) for x, y in zip(x_fit, y_fit)]
             return fitted_curve, poly_coeffs
 
-    def detect_global_cej_lines(self, teeth_data, image, image_shape):
+    def detect_root_boundary_lines(self, teeth_data, image, image_shape, debug_dir=None):
         """
-        检测全局的CEJ线（上颌和下颌各一条）- 新算法
+        检测牙根边界线（上颌和下颌各一条）- 简化算法
 
-        新算法基于：
-        1. 凸包ROI提取（只有凸面）
-        2. 删除牙齿区域，只保留牙槽骨
-        3. Canny边缘检测提取牙槽骨边缘
-        4. 确保边缘点数>=13且分布均匀
-        5. 多项式曲线拟合
+        简化算法流程：
+        1. 创建凸包ROI（只有凸面）
+        2. 在ROI区域内进行Canny边缘检测
+        3. 清除牙齿内部的边缘点
+        4. 用剩余边缘点拟合曲线
 
         参数:
             teeth_data: 所有牙齿数据
             image: 预处理后的图像
             image_shape: 图像形状
+            debug_dir: debug图像保存目录
 
         返回:
-            upper_cej: 上颌CEJ线数据 {'curve': [...], 'coeffs': [...]}
-            lower_cej: 下颌CEJ线数据
+            upper_boundary: 上颌边界线数据 {'curve': [...], 'coeffs': [...]}
+            lower_boundary: 下颌边界线数据
         """
-        print("正在检测全局CEJ线（使用凸包ROI和牙槽骨边缘检测）...")
+        print("正在检测牙根边界线（使用凸包ROI边缘检测）...")
 
         height, width = image_shape[:2]
 
         # 1. 分离上下颌牙齿
         upper_teeth, lower_teeth = self.separate_upper_lower_jaws(teeth_data, height)
 
-        upper_cej = None
-        lower_cej = None
+        upper_boundary = None
+        lower_boundary = None
 
         # 2. 处理上颌
         if len(upper_teeth) > 0:
-            print("  处理上颌CEJ线...")
+            print("  处理上颌边界线...")
 
-            # 2.1 创建凸包ROI（不扩展）
+            # 2.1 创建凸包ROI
             convex_hull, roi_mask, teeth_mask = self.create_convex_hull_roi(
                 upper_teeth, image_shape)
 
             if convex_hull is not None:
-                # 2.2 创建只包含牙槽骨的图像（删除牙齿及其边缘缓冲区）
-                alveolar_image = self.create_alveolar_bone_image(image, roi_mask, teeth_mask, buffer_pixels=5)
+                # 2.2 检测ROI中的边缘，并移除牙齿内部的点
+                edge_points, debug_images = self.detect_roi_edges_simple(
+                    image, roi_mask, teeth_mask, convex_hull,
+                    canny_low=50, canny_high=150,
+                    debug_dir=debug_dir, jaw_name='upper'
+                )
 
-                # 2.3 提取均匀分布的边缘点
-                edge_points, is_valid = self.extract_uniform_edge_points(
-                    alveolar_image, upper_teeth, convex_hull, min_points=13)
-
-                if is_valid and len(edge_points) >= 3:
-                    # 2.4 拟合CEJ曲线
-                    fitted_curve, poly_coeffs = self.fit_cej_curve(edge_points, width)
+                if len(edge_points) >= 3:
+                    # 2.3 拟合曲线
+                    fitted_curve, poly_coeffs = self.fit_cej_curve(edge_points, width, degree=3)
 
                     if fitted_curve is not None:
-                        upper_cej = {
+                        upper_boundary = {
                             'curve': fitted_curve,
                             'coeffs': poly_coeffs,
                             'points': edge_points,
                             'teeth': upper_teeth,
-                            'convex_hull': convex_hull
+                            'convex_hull': convex_hull,
+                            'debug_images': debug_images
                         }
-                        print(f"    ✓ 上颌CEJ线已检测，包含 {len(edge_points)} 个边缘点，{len(fitted_curve)} 个拟合点")
+                        print(f"    ✓ 上颌边界线已检测，包含 {len(edge_points)} 个边缘点，{len(fitted_curve)} 个拟合点")
+
+                        # 保存拟合曲线可视化
+                        if debug_dir is not None:
+                            self._save_fitted_curve_debug(
+                                image, edge_points, fitted_curve, convex_hull,
+                                debug_dir, 'upper'
+                            )
                 else:
-                    print(f"    ✗ 上颌CEJ线检测失败：边缘点不足或分布不均")
+                    print(f"    ✗ 上颌边界线检测失败：边缘点不足 ({len(edge_points)} < 3)")
 
         # 3. 处理下颌
         if len(lower_teeth) > 0:
-            print("  处理下颌CEJ线...")
+            print("  处理下颌边界线...")
 
-            # 3.1 创建凸包ROI（不扩展）
+            # 3.1 创建凸包ROI
             convex_hull, roi_mask, teeth_mask = self.create_convex_hull_roi(
                 lower_teeth, image_shape)
 
             if convex_hull is not None:
-                # 3.2 创建只包含牙槽骨的图像（删除牙齿及其边缘缓冲区）
-                alveolar_image = self.create_alveolar_bone_image(image, roi_mask, teeth_mask, buffer_pixels=5)
+                # 3.2 检测ROI中的边缘，并移除牙齿内部的点
+                edge_points, debug_images = self.detect_roi_edges_simple(
+                    image, roi_mask, teeth_mask, convex_hull,
+                    canny_low=50, canny_high=150,
+                    debug_dir=debug_dir, jaw_name='lower'
+                )
 
-                # 3.3 提取均匀分布的边缘点
-                edge_points, is_valid = self.extract_uniform_edge_points(
-                    alveolar_image, lower_teeth, convex_hull, min_points=13)
-
-                if is_valid and len(edge_points) >= 3:
-                    # 3.4 拟合CEJ曲线
-                    fitted_curve, poly_coeffs = self.fit_cej_curve(edge_points, width)
+                if len(edge_points) >= 3:
+                    # 3.3 拟合曲线
+                    fitted_curve, poly_coeffs = self.fit_cej_curve(edge_points, width, degree=3)
 
                     if fitted_curve is not None:
-                        lower_cej = {
+                        lower_boundary = {
                             'curve': fitted_curve,
                             'coeffs': poly_coeffs,
                             'points': edge_points,
                             'teeth': lower_teeth,
-                            'convex_hull': convex_hull
+                            'convex_hull': convex_hull,
+                            'debug_images': debug_images
                         }
-                        print(f"    ✓ 下颌CEJ线已检测，包含 {len(edge_points)} 个边缘点，{len(fitted_curve)} 个拟合点")
-                else:
-                    print(f"    ✗ 下颌CEJ线检测失败：边缘点不足或分布不均")
+                        print(f"    ✓ 下颌边界线已检测，包含 {len(edge_points)} 个边缘点，{len(fitted_curve)} 个拟合点")
 
-        return upper_cej, lower_cej
+                        # 保存拟合曲线可视化
+                        if debug_dir is not None:
+                            self._save_fitted_curve_debug(
+                                image, edge_points, fitted_curve, convex_hull,
+                                debug_dir, 'lower'
+                            )
+                else:
+                    print(f"    ✗ 下颌边界线检测失败：边缘点不足 ({len(edge_points)} < 3)")
+
+        return upper_boundary, lower_boundary
+
+    def _save_fitted_curve_debug(self, image, edge_points, fitted_curve, convex_hull,
+                                 debug_dir, jaw_name):
+        """
+        保存拟合曲线的debug可视化
+
+        参数:
+            image: 原始图像
+            edge_points: 边缘点列表
+            fitted_curve: 拟合曲线
+            convex_hull: 凸包轮廓
+            debug_dir: debug目录
+            jaw_name: 颌名称
+        """
+        # 创建可视化图像
+        vis_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if len(image.shape) == 2 else image.copy()
+
+        # 绘制凸包
+        cv2.drawContours(vis_image, [convex_hull], -1, (0, 255, 0), 2)
+
+        # 绘制边缘点（黄色小圆点）
+        for x, y in edge_points:
+            cv2.circle(vis_image, (x, y), 2, (0, 255, 255), -1)
+
+        # 绘制拟合曲线（蓝色粗线）
+        if len(fitted_curve) > 1:
+            pts = np.array(fitted_curve, dtype=np.int32)
+            cv2.polylines(vis_image, [pts], False, (255, 0, 0), 3)
+
+        # 保存
+        output_path = os.path.join(debug_dir, f'{jaw_name}_07_fitted_curve.png')
+        cv2.imwrite(output_path, vis_image)
+        print(f"    拟合曲线可视化已保存: {output_path}")
 
     def detect_cej_line(self, tooth_data, original_image):
         """
@@ -1060,6 +1094,12 @@ class ToothCEJAnalyzer:
         """
         分析单张全景X光图像
 
+        使用简化的边界线检测算法：
+        1. 创建凸包ROI
+        2. 检测边缘
+        3. 清除牙齿内部边缘
+        4. 拟合曲线
+
         参数:
             image_path: 图像路径
             output_dir: 输出目录
@@ -1096,84 +1136,83 @@ class ToothCEJAnalyzer:
             print("❌ 未检测到牙齿")
             return None
 
-        # 使用新的全局CEJ线检测方法
-        print("正在检测全局CEJ线...")
-        upper_cej, lower_cej = self.detect_global_cej_lines(teeth_data, processed, original_image.shape)
+        # 创建debug输出目录
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        debug_dir = os.path.join(output_dir, f'{base_name}_debug')
+        os.makedirs(debug_dir, exist_ok=True)
+        print(f"Debug图像将保存到: {debug_dir}")
 
-        # 为了向后兼容，为每颗牙齿分配CEJ线信息
-        # 根据牙齿所属的上颌或下颌，使用对应的全局CEJ线
+        # 使用新的简化边界线检测方法
+        print("正在检测牙根边界线...")
+        upper_boundary, lower_boundary = self.detect_root_boundary_lines(
+            teeth_data, processed, original_image.shape, debug_dir=debug_dir
+        )
+
+        # 为每颗牙齿分配边界线信息
         for i, tooth in enumerate(teeth_data):
             # 确定牙齿属于上颌还是下颌
-            centroid_y = tooth['centroid'][1]
-
-            # 如果有上下颌CEJ线，根据牙齿位置选择
-            if upper_cej is not None and lower_cej is not None:
+            if upper_boundary is not None and lower_boundary is not None:
                 # 判断牙齿属于哪个颌
-                is_upper = any(t['label'] == tooth['label'] for t in upper_cej['teeth'])
-                cej_data = upper_cej if is_upper else lower_cej
-            elif upper_cej is not None:
-                cej_data = upper_cej
-            elif lower_cej is not None:
-                cej_data = lower_cej
+                is_upper = any(t['label'] == tooth['label'] for t in upper_boundary['teeth'])
+                boundary_data = upper_boundary if is_upper else lower_boundary
+            elif upper_boundary is not None:
+                boundary_data = upper_boundary
+            elif lower_boundary is not None:
+                boundary_data = lower_boundary
             else:
-                # 回退到旧方法
-                print(f"  警告：无法使用全局CEJ线，使用单个牙齿检测方法")
-                cej_curve, cej_center, cej_normal = self.detect_cej_line(tooth, processed)
-                tooth['cej_curve'] = cej_curve
-                tooth['cej_point'] = cej_center
-                tooth['cej_normal'] = cej_normal
+                # 如果没有检测到边界线，使用简单的估计
+                print(f"  警告：无法检测边界线，使用简单估计")
+                x, y, w, h = tooth['bbox']
+                cej_y = y + int(h * 0.4)
+                tooth['cej_curve'] = [(x, cej_y), (x + w, cej_y)]
+                tooth['cej_point'] = (int(x + w / 2), cej_y)
+                tooth['cej_normal'] = np.array([0, 1])
                 continue
 
-            # 从全局CEJ曲线中找到该牙齿对应的CEJ点
+            # 从边界线曲线中找到该牙齿对应的点
             tooth_x = tooth['centroid'][0]
-            cej_curve = cej_data['curve']
+            boundary_curve = boundary_data['curve']
 
-            # 找到最接近牙齿X坐标的CEJ点
+            # 找到最接近牙齿X坐标的点
             closest_points = []
-            for point in cej_curve:
-                if abs(point[0] - tooth_x) < tooth['bbox'][2] / 2:  # 在牙齿宽度的一半范围内
+            for point in boundary_curve:
+                if abs(point[0] - tooth_x) < tooth['bbox'][2] / 2:
                     closest_points.append(point)
 
             if len(closest_points) > 0:
-                # 使用这些点作为该牙齿的CEJ点
+                # 使用这些点作为该牙齿的边界点
                 tooth['cej_curve'] = closest_points
-                # 计算CEJ中心点（用于深度测量）
                 avg_x = int(np.mean([p[0] for p in closest_points]))
                 avg_y = int(np.mean([p[1] for p in closest_points]))
                 tooth['cej_point'] = (avg_x, avg_y)
 
-                # 计算法线（从曲线的导数）
-                # 使用多项式系数计算切线方向
-                poly_coeffs = cej_data['coeffs']
-                # dy/dx = poly'(x)
+                # 计算法线
+                poly_coeffs = boundary_data['coeffs']
                 poly_derivative = np.polyder(poly_coeffs)
                 slope = np.polyval(poly_derivative, avg_x)
                 tangent = np.array([1.0, slope])
                 tangent = tangent / np.linalg.norm(tangent)
-                # 法线垂直于切线
                 cej_normal = np.array([-tangent[1], tangent[0]])
-                # 确保法线指向下方
                 if cej_normal[1] < 0:
                     cej_normal = -cej_normal
                 tooth['cej_normal'] = cej_normal
             else:
-                # 如果没有找到对应的点，使用曲线上最近的点
+                # 使用曲线上最近的点
                 min_dist = float('inf')
-                closest_point = cej_curve[0]
-                for point in cej_curve:
+                closest_point = boundary_curve[0]
+                for point in boundary_curve:
                     dist = abs(point[0] - tooth_x)
                     if dist < min_dist:
                         min_dist = dist
                         closest_point = point
-
                 tooth['cej_curve'] = [closest_point]
                 tooth['cej_point'] = closest_point
-                tooth['cej_normal'] = np.array([0, 1])  # 默认垂直向下
+                tooth['cej_normal'] = np.array([0, 1])
 
-        # 保存全局CEJ线数据到结果中
-        global_cej_data = {
-            'upper_cej': upper_cej,
-            'lower_cej': lower_cej
+        # 保存边界线数据
+        boundary_data = {
+            'upper_boundary': upper_boundary,
+            'lower_boundary': lower_boundary
         }
 
         # 测量每颗牙齿的根部深度
@@ -1217,18 +1256,18 @@ class ToothCEJAnalyzer:
 
         # 可视化结果
         print("正在生成可视化...")
-        self.visualize_results(original_image, teeth_data, spacing_results, image_path, output_dir, global_cej_data)
+        self.visualize_results(original_image, teeth_data, spacing_results, image_path, output_dir, boundary_data)
 
         results = {
             'image_path': image_path,
             'teeth_data': teeth_data,
             'spacing_results': spacing_results,
-            'global_cej': global_cej_data
+            'boundary_data': boundary_data
         }
 
         return results
 
-    def visualize_results(self, original_image, teeth_data, spacing_results, image_path, output_dir, global_cej_data=None):
+    def visualize_results(self, original_image, teeth_data, spacing_results, image_path, output_dir, boundary_data=None):
         """
         可视化分析结果
 
@@ -1238,7 +1277,7 @@ class ToothCEJAnalyzer:
             spacing_results: 间距测量结果
             image_path: 原始图像路径
             output_dir: 输出目录
-            global_cej_data: 全局CEJ线数据（可选）
+            boundary_data: 边界线数据（可选）
         """
         # 创建输出目录
         os.makedirs(output_dir, exist_ok=True)
@@ -1265,60 +1304,58 @@ class ToothCEJAnalyzer:
                     fontsize=10, color='yellow', fontweight='bold',
                     bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
 
-        # 绘制全局CEJ线（上颌和下颌各一条）
-        if global_cej_data is not None:
-            upper_cej = global_cej_data.get('upper_cej')
-            lower_cej = global_cej_data.get('lower_cej')
+        # 绘制边界线（上颌和下颌各一条）
+        if boundary_data is not None:
+            upper_boundary = boundary_data.get('upper_boundary')
+            lower_boundary = boundary_data.get('lower_boundary')
 
-            # 绘制上颌CEJ线
-            if upper_cej is not None and 'curve' in upper_cej:
-                cej_curve = upper_cej['curve']
-                cej_x = [p[0] for p in cej_curve]
-                cej_y = [p[1] for p in cej_curve]
-                ax1.plot(cej_x, cej_y, 'b-', linewidth=4, alpha=0.9, label='上颌CEJ线')
+            # 绘制上颌边界线
+            if upper_boundary is not None and 'curve' in upper_boundary:
+                boundary_curve = upper_boundary['curve']
+                curve_x = [p[0] for p in boundary_curve]
+                curve_y = [p[1] for p in boundary_curve]
+                ax1.plot(curve_x, curve_y, 'b-', linewidth=4, alpha=0.9, label='上颌边界线')
 
-                # 绘制CEJ候选点
-                if 'points' in upper_cej:
-                    points = upper_cej['points']
+                # 绘制边缘点
+                if 'points' in upper_boundary:
+                    points = upper_boundary['points']
                     points_x = [p[0] for p in points]
                     points_y = [p[1] for p in points]
                     ax1.scatter(points_x, points_y, c='cyan', s=20, alpha=0.6, marker='o')
 
-            # 绘制下颌CEJ线
-            if lower_cej is not None and 'curve' in lower_cej:
-                cej_curve = lower_cej['curve']
-                cej_x = [p[0] for p in cej_curve]
-                cej_y = [p[1] for p in cej_curve]
-                ax1.plot(cej_x, cej_y, 'r-', linewidth=4, alpha=0.9, label='下颌CEJ线')
+            # 绘制下颌边界线
+            if lower_boundary is not None and 'curve' in lower_boundary:
+                boundary_curve = lower_boundary['curve']
+                curve_x = [p[0] for p in boundary_curve]
+                curve_y = [p[1] for p in boundary_curve]
+                ax1.plot(curve_x, curve_y, 'r-', linewidth=4, alpha=0.9, label='下颌边界线')
 
-                # 绘制CEJ候选点
-                if 'points' in lower_cej:
-                    points = lower_cej['points']
+                # 绘制边缘点
+                if 'points' in lower_boundary:
+                    points = lower_boundary['points']
                     points_x = [p[0] for p in points]
                     points_y = [p[1] for p in points]
                     ax1.scatter(points_x, points_y, c='orange', s=20, alpha=0.6, marker='o')
 
             ax1.legend(loc='upper right', fontsize=10)
         else:
-            # 如果没有全局CEJ数据，绘制单个牙齿的CEJ线（兼容旧方法）
+            # 如果没有边界线数据，绘制单个牙齿的边界点（兼容旧方法）
             for i, tooth in enumerate(teeth_data):
                 cej_curve = tooth.get('cej_curve', [])
                 cej_point = tooth.get('cej_point')
 
                 if len(cej_curve) >= 2:
-                    # 将CEJ曲线点转换为数组用于绘图
                     cej_x = [p[0] for p in cej_curve]
                     cej_y = [p[1] for p in cej_curve]
-                    ax1.plot(cej_x, cej_y, 'b-', linewidth=3, alpha=0.8, label=f'CEJ {i+1}' if i == 0 else '')
+                    ax1.plot(cej_x, cej_y, 'b-', linewidth=3, alpha=0.8, label=f'边界 {i+1}' if i == 0 else '')
 
                 if cej_point is not None:
-                    # 绘制CEJ中心点
                     ax1.plot(cej_point[0], cej_point[1], 'ro', markersize=8)
 
-        # 2. CEJ线深度测量示意图
+        # 2. 边界线深度测量示意图
         ax2 = plt.subplot(2, 2, 2)
         ax2.imshow(cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB))
-        ax2.set_title('CEJ线法线方向深度测量', fontsize=14, fontweight='bold')
+        ax2.set_title('边界线法线方向深度测量', fontsize=14, fontweight='bold')
         ax2.axis('off')
 
         for i, tooth in enumerate(teeth_data):
