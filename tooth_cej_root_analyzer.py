@@ -243,10 +243,338 @@ class ToothCEJAnalyzer:
 
         return teeth_data
 
+    def separate_upper_lower_jaws(self, teeth_data, image_height):
+        """
+        将牙齿分离为上颌和下颌两组
+
+        参数:
+            teeth_data: 所有牙齿的数据列表
+            image_height: 图像高度
+
+        返回:
+            upper_teeth: 上颌牙齿列表
+            lower_teeth: 下颌牙齿列表
+        """
+        if len(teeth_data) == 0:
+            return [], []
+
+        # 计算所有牙齿中心的Y坐标
+        y_coords = [tooth['centroid'][1] for tooth in teeth_data]
+
+        # 使用K-means或简单的中位数分割
+        # 这里使用简单方法：如果牙齿明显分为上下两组，用间隙分割
+        y_sorted = sorted(y_coords)
+
+        # 寻找最大的Y坐标间隙
+        if len(y_sorted) >= 2:
+            max_gap = 0
+            split_y = image_height // 2
+
+            for i in range(len(y_sorted) - 1):
+                gap = y_sorted[i + 1] - y_sorted[i]
+                if gap > max_gap:
+                    max_gap = gap
+                    split_y = (y_sorted[i] + y_sorted[i + 1]) / 2
+
+            # 如果最大间隙足够大（说明有明显的上下颌分离）
+            if max_gap > image_height * 0.05:  # 间隙大于图像高度的5%
+                threshold_y = split_y
+            else:
+                # 否则使用图像中心
+                threshold_y = image_height // 2
+        else:
+            threshold_y = image_height // 2
+
+        upper_teeth = [tooth for tooth in teeth_data if tooth['centroid'][1] < threshold_y]
+        lower_teeth = [tooth for tooth in teeth_data if tooth['centroid'][1] >= threshold_y]
+
+        print(f"  上颌牙齿: {len(upper_teeth)} 颗，下颌牙齿: {len(lower_teeth)} 颗")
+
+        return upper_teeth, lower_teeth
+
+    def create_jaw_roi(self, teeth_group, image_shape, expand_pixels=50):
+        """
+        为一组牙齿创建ROI区域
+
+        参数:
+            teeth_group: 牙齿组（上颌或下颌）
+            image_shape: 图像形状 (height, width)
+            expand_pixels: ROI扩展像素数
+
+        返回:
+            roi_bbox: ROI边界框 (x, y, w, h)
+            teeth_mask: 牙齿区域的掩码
+        """
+        if len(teeth_group) == 0:
+            return None, None
+
+        height, width = image_shape[:2]
+
+        # 合并所有牙齿的边界框
+        min_x = width
+        min_y = height
+        max_x = 0
+        max_y = 0
+
+        # 创建合并的牙齿掩码
+        teeth_mask = np.zeros((height, width), dtype=np.uint8)
+
+        for tooth in teeth_group:
+            x, y, w, h = tooth['bbox']
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x + w)
+            max_y = max(max_y, y + h)
+
+            # 将牙齿掩码添加到总掩码
+            teeth_mask = cv2.bitwise_or(teeth_mask, tooth['mask'])
+
+        # 扩展ROI区域
+        min_x = max(0, min_x - expand_pixels)
+        min_y = max(0, min_y - expand_pixels)
+        max_x = min(width, max_x + expand_pixels)
+        max_y = min(height, max_y + expand_pixels)
+
+        roi_bbox = (min_x, min_y, max_x - min_x, max_y - min_y)
+
+        return roi_bbox, teeth_mask
+
+    def detect_cej_points_in_roi(self, image, teeth_group, roi_bbox, teeth_mask):
+        """
+        在ROI区域内检测CEJ候选点
+
+        参数:
+            image: 预处理后的图像
+            teeth_group: 牙齿组
+            roi_bbox: ROI边界框
+            teeth_mask: 牙齿掩码
+
+        返回:
+            cej_points: CEJ候选点列表 [(x, y), ...]
+        """
+        if roi_bbox is None or len(teeth_group) == 0:
+            return []
+
+        x, y, w, h = roi_bbox
+
+        # 提取ROI区域
+        roi_image = image[y:y+h, x:x+w]
+        roi_mask = teeth_mask[y:y+h, x:x+w]
+
+        # 边缘检测
+        edges = cv2.Canny(roi_image, 50, 150)
+
+        # 使用形态学操作连接边缘
+        kernel = np.ones((3, 3), np.uint8)
+        edges = cv2.dilate(edges, kernel, iterations=1)
+
+        cej_points = []
+
+        # 对每颗牙齿，找到CEJ候选点
+        for tooth in teeth_group:
+            tooth_x, tooth_y, tooth_w, tooth_h = tooth['bbox']
+            contour = tooth['contour']
+
+            # 计算牙齿在ROI中的相对位置
+            rel_x = tooth_x - x
+            rel_y = tooth_y - y
+
+            # 在牙齿的30%-50%高度范围内搜索CEJ点
+            search_y_start = max(0, rel_y + int(tooth_h * 0.25))
+            search_y_end = min(h, rel_y + int(tooth_h * 0.6))
+            search_x_start = max(0, rel_x - 10)
+            search_x_end = min(w, rel_x + tooth_w + 10)
+
+            # 分析牙齿轮廓的宽度变化，找到收缩点
+            width_profile = []
+            y_positions = []
+
+            for scan_y in range(tooth_y, tooth_y + tooth_h, 2):
+                intersections = []
+                for point in contour:
+                    px, py = point[0]
+                    if abs(py - scan_y) <= 2:
+                        intersections.append(px)
+
+                if len(intersections) >= 2:
+                    intersections.sort()
+                    width = max(intersections) - min(intersections)
+                    width_profile.append(width)
+                    y_positions.append(scan_y)
+
+            if len(width_profile) >= 5:
+                # 平滑宽度曲线
+                from scipy.ndimage import gaussian_filter1d
+                smoothed_width = gaussian_filter1d(width_profile, sigma=2)
+
+                # 计算梯度（宽度变化率）
+                gradient = np.gradient(smoothed_width)
+
+                # 在搜索范围内找到最大负梯度（宽度收缩最快的位置）
+                search_start_idx = max(0, int(len(gradient) * 0.25))
+                search_end_idx = min(len(gradient), int(len(gradient) * 0.6))
+
+                if search_end_idx > search_start_idx:
+                    search_region = gradient[search_start_idx:search_end_idx]
+                    min_grad_idx = np.argmin(search_region)
+                    cej_idx = search_start_idx + min_grad_idx
+                    cej_y = y_positions[cej_idx]
+
+                    # 在该Y坐标处找到牙齿轮廓的边缘点
+                    for point in contour:
+                        px, py = point[0]
+                        if abs(py - cej_y) <= 3:
+                            cej_points.append((px, py))
+
+        # 去重并排序
+        if len(cej_points) > 0:
+            cej_points = list(set(cej_points))
+            cej_points.sort(key=lambda p: p[0])
+
+        return cej_points
+
+    def fit_cej_curve(self, cej_points, image_width, degree=3):
+        """
+        使用多项式拟合CEJ曲线
+
+        参数:
+            cej_points: CEJ候选点
+            image_width: 图像宽度
+            degree: 多项式阶数
+
+        返回:
+            fitted_curve: 拟合后的曲线点 [(x, y), ...]
+            poly_coeffs: 多项式系数（用于计算法线）
+        """
+        if len(cej_points) < 3:
+            return None, None
+
+        # 提取x和y坐标
+        x_coords = np.array([p[0] for p in cej_points])
+        y_coords = np.array([p[1] for p in cej_points])
+
+        # 使用RANSAC去除离群点
+        from sklearn.linear_model import RANSACRegressor
+        from sklearn.preprocessing import PolynomialFeatures
+        from sklearn.pipeline import make_pipeline
+
+        try:
+            # 创建多项式回归模型
+            X = x_coords.reshape(-1, 1)
+            y = y_coords
+
+            # 使用RANSAC拟合
+            ransac = RANSACRegressor(
+                estimator=make_pipeline(PolynomialFeatures(degree),
+                                       type('LinearRegression', (), {'fit': lambda self, X, y: self,
+                                                                     'predict': lambda self, X: np.polyval(np.polyfit(X.flatten(), y, degree), X.flatten())}
+                                       )()),
+                min_samples=max(3, len(cej_points) // 3),
+                residual_threshold=10,
+                max_trials=100
+            )
+
+            # 简化：直接使用numpy的polyfit
+            # 去除明显的离群点（y坐标标准差的2倍之外）
+            y_mean = np.mean(y_coords)
+            y_std = np.std(y_coords)
+
+            # 过滤离群点
+            valid_mask = np.abs(y_coords - y_mean) < 2 * y_std
+            x_filtered = x_coords[valid_mask]
+            y_filtered = y_coords[valid_mask]
+
+            if len(x_filtered) < 3:
+                x_filtered = x_coords
+                y_filtered = y_coords
+
+            # 多项式拟合
+            poly_coeffs = np.polyfit(x_filtered, y_filtered, degree)
+
+            # 生成拟合曲线
+            x_min, x_max = int(x_coords.min()), int(x_coords.max())
+            x_fit = np.linspace(x_min, x_max, max(100, x_max - x_min))
+            y_fit = np.polyval(poly_coeffs, x_fit)
+
+            fitted_curve = [(int(x), int(y)) for x, y in zip(x_fit, y_fit)]
+
+            return fitted_curve, poly_coeffs
+
+        except Exception as e:
+            print(f"    拟合失败: {e}，使用简单平均")
+            # 后备方案：使用简单的线性拟合
+            poly_coeffs = np.polyfit(x_coords, y_coords, 1)
+            x_min, x_max = int(x_coords.min()), int(x_coords.max())
+            x_fit = np.linspace(x_min, x_max, x_max - x_min)
+            y_fit = np.polyval(poly_coeffs, x_fit)
+            fitted_curve = [(int(x), int(y)) for x, y in zip(x_fit, y_fit)]
+            return fitted_curve, poly_coeffs
+
+    def detect_global_cej_lines(self, teeth_data, image, image_shape):
+        """
+        检测全局的CEJ线（上颌和下颌各一条）
+
+        参数:
+            teeth_data: 所有牙齿数据
+            image: 预处理后的图像
+            image_shape: 图像形状
+
+        返回:
+            upper_cej: 上颌CEJ线数据 {'curve': [...], 'coeffs': [...]}
+            lower_cej: 下颌CEJ线数据
+        """
+        print("正在检测全局CEJ线...")
+
+        height, width = image_shape[:2]
+
+        # 1. 分离上下颌牙齿
+        upper_teeth, lower_teeth = self.separate_upper_lower_jaws(teeth_data, height)
+
+        upper_cej = None
+        lower_cej = None
+
+        # 2. 处理上颌
+        if len(upper_teeth) > 0:
+            print("  处理上颌CEJ线...")
+            roi_bbox, teeth_mask = self.create_jaw_roi(upper_teeth, image_shape)
+            cej_points = self.detect_cej_points_in_roi(image, upper_teeth, roi_bbox, teeth_mask)
+
+            if len(cej_points) >= 3:
+                fitted_curve, poly_coeffs = self.fit_cej_curve(cej_points, width)
+                if fitted_curve is not None:
+                    upper_cej = {
+                        'curve': fitted_curve,
+                        'coeffs': poly_coeffs,
+                        'points': cej_points,
+                        'teeth': upper_teeth
+                    }
+                    print(f"    ✓ 上颌CEJ线已检测，包含 {len(fitted_curve)} 个拟合点")
+
+        # 3. 处理下颌
+        if len(lower_teeth) > 0:
+            print("  处理下颌CEJ线...")
+            roi_bbox, teeth_mask = self.create_jaw_roi(lower_teeth, image_shape)
+            cej_points = self.detect_cej_points_in_roi(image, lower_teeth, roi_bbox, teeth_mask)
+
+            if len(cej_points) >= 3:
+                fitted_curve, poly_coeffs = self.fit_cej_curve(cej_points, width)
+                if fitted_curve is not None:
+                    lower_cej = {
+                        'curve': fitted_curve,
+                        'coeffs': poly_coeffs,
+                        'points': cej_points,
+                        'teeth': lower_teeth
+                    }
+                    print(f"    ✓ 下颌CEJ线已检测，包含 {len(fitted_curve)} 个拟合点")
+
+        return upper_cej, lower_cej
+
     def detect_cej_line(self, tooth_data, original_image):
         """
-        检测单颗牙齿的CEJ线（釉牙骨质界）
-        CEJ线是沿着牙齿轮廓的曲线，位于牙冠和牙根的交界处
+        检测单颗牙齿的CEJ线（釉牙骨质界）- 旧方法，保留用于向后兼容
+
+        注意：此方法已被 detect_global_cej_lines 替代
+        建议使用全局CEJ检测方法
 
         参数:
             tooth_data: 牙齿数据字典
@@ -553,14 +881,85 @@ class ToothCEJAnalyzer:
             print("❌ 未检测到牙齿")
             return None
 
-        # 为每颗牙齿检测CEJ线
-        print("正在检测CEJ线...")
+        # 使用新的全局CEJ线检测方法
+        print("正在检测全局CEJ线...")
+        upper_cej, lower_cej = self.detect_global_cej_lines(teeth_data, processed, original_image.shape)
+
+        # 为了向后兼容，为每颗牙齿分配CEJ线信息
+        # 根据牙齿所属的上颌或下颌，使用对应的全局CEJ线
         for i, tooth in enumerate(teeth_data):
-            cej_curve, cej_center, cej_normal = self.detect_cej_line(tooth, processed)
-            tooth['cej_curve'] = cej_curve  # CEJ曲线点列表
-            tooth['cej_point'] = cej_center  # CEJ中心点（用于深度测量）
-            tooth['cej_normal'] = cej_normal
-            print(f"  牙齿 {i+1}: CEJ线包含 {len(cej_curve)} 个点，中心位于 Y={cej_center[1]}")
+            # 确定牙齿属于上颌还是下颌
+            centroid_y = tooth['centroid'][1]
+
+            # 如果有上下颌CEJ线，根据牙齿位置选择
+            if upper_cej is not None and lower_cej is not None:
+                # 判断牙齿属于哪个颌
+                is_upper = any(t['label'] == tooth['label'] for t in upper_cej['teeth'])
+                cej_data = upper_cej if is_upper else lower_cej
+            elif upper_cej is not None:
+                cej_data = upper_cej
+            elif lower_cej is not None:
+                cej_data = lower_cej
+            else:
+                # 回退到旧方法
+                print(f"  警告：无法使用全局CEJ线，使用单个牙齿检测方法")
+                cej_curve, cej_center, cej_normal = self.detect_cej_line(tooth, processed)
+                tooth['cej_curve'] = cej_curve
+                tooth['cej_point'] = cej_center
+                tooth['cej_normal'] = cej_normal
+                continue
+
+            # 从全局CEJ曲线中找到该牙齿对应的CEJ点
+            tooth_x = tooth['centroid'][0]
+            cej_curve = cej_data['curve']
+
+            # 找到最接近牙齿X坐标的CEJ点
+            closest_points = []
+            for point in cej_curve:
+                if abs(point[0] - tooth_x) < tooth['bbox'][2] / 2:  # 在牙齿宽度的一半范围内
+                    closest_points.append(point)
+
+            if len(closest_points) > 0:
+                # 使用这些点作为该牙齿的CEJ点
+                tooth['cej_curve'] = closest_points
+                # 计算CEJ中心点（用于深度测量）
+                avg_x = int(np.mean([p[0] for p in closest_points]))
+                avg_y = int(np.mean([p[1] for p in closest_points]))
+                tooth['cej_point'] = (avg_x, avg_y)
+
+                # 计算法线（从曲线的导数）
+                # 使用多项式系数计算切线方向
+                poly_coeffs = cej_data['coeffs']
+                # dy/dx = poly'(x)
+                poly_derivative = np.polyder(poly_coeffs)
+                slope = np.polyval(poly_derivative, avg_x)
+                tangent = np.array([1.0, slope])
+                tangent = tangent / np.linalg.norm(tangent)
+                # 法线垂直于切线
+                cej_normal = np.array([-tangent[1], tangent[0]])
+                # 确保法线指向下方
+                if cej_normal[1] < 0:
+                    cej_normal = -cej_normal
+                tooth['cej_normal'] = cej_normal
+            else:
+                # 如果没有找到对应的点，使用曲线上最近的点
+                min_dist = float('inf')
+                closest_point = cej_curve[0]
+                for point in cej_curve:
+                    dist = abs(point[0] - tooth_x)
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_point = point
+
+                tooth['cej_curve'] = [closest_point]
+                tooth['cej_point'] = closest_point
+                tooth['cej_normal'] = np.array([0, 1])  # 默认垂直向下
+
+        # 保存全局CEJ线数据到结果中
+        global_cej_data = {
+            'upper_cej': upper_cej,
+            'lower_cej': lower_cej
+        }
 
         # 测量每颗牙齿的根部深度
         print("正在测量牙根深度...")
@@ -603,17 +1002,18 @@ class ToothCEJAnalyzer:
 
         # 可视化结果
         print("正在生成可视化...")
-        self.visualize_results(original_image, teeth_data, spacing_results, image_path, output_dir)
+        self.visualize_results(original_image, teeth_data, spacing_results, image_path, output_dir, global_cej_data)
 
         results = {
             'image_path': image_path,
             'teeth_data': teeth_data,
-            'spacing_results': spacing_results
+            'spacing_results': spacing_results,
+            'global_cej': global_cej_data
         }
 
         return results
 
-    def visualize_results(self, original_image, teeth_data, spacing_results, image_path, output_dir):
+    def visualize_results(self, original_image, teeth_data, spacing_results, image_path, output_dir, global_cej_data=None):
         """
         可视化分析结果
 
@@ -623,6 +1023,7 @@ class ToothCEJAnalyzer:
             spacing_results: 间距测量结果
             image_path: 原始图像路径
             output_dir: 输出目录
+            global_cej_data: 全局CEJ线数据（可选）
         """
         # 创建输出目录
         os.makedirs(output_dir, exist_ok=True)
@@ -630,36 +1031,74 @@ class ToothCEJAnalyzer:
         # 创建图形
         fig = plt.figure(figsize=(20, 12))
 
-        # 1. 原始图像 + 牙齿轮廓 + CEJ线
+        # 1. 原始图像 + 牙齿轮廓 + 全局CEJ线
         ax1 = plt.subplot(2, 2, 1)
         ax1.imshow(cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB))
-        ax1.set_title('牙齿检测与CEJ线标注', fontsize=14, fontweight='bold')
+        ax1.set_title('牙齿检测与全局CEJ线标注', fontsize=14, fontweight='bold')
         ax1.axis('off')
 
-        # 绘制每颗牙齿的轮廓和CEJ线
+        # 绘制每颗牙齿的轮廓
         for i, tooth in enumerate(teeth_data):
             # 绘制轮廓
             contour = tooth['contour']
             color = tuple(np.random.randint(100, 255, 3).tolist())
             cv2.drawContours(original_image, [contour], -1, color, 2)
 
-            # 绘制CEJ线（作为曲线）
-            cej_curve = tooth['cej_curve']
-            cej_point = tooth['cej_point']
-
-            if len(cej_curve) >= 2:
-                # 将CEJ曲线点转换为数组用于绘图
-                cej_x = [p[0] for p in cej_curve]
-                cej_y = [p[1] for p in cej_curve]
-                ax1.plot(cej_x, cej_y, 'b-', linewidth=3, alpha=0.8, label=f'CEJ {i+1}' if i == 0 else '')
-
-            # 绘制CEJ中心点
-            ax1.plot(cej_point[0], cej_point[1], 'ro', markersize=8)
-
             # 标注牙齿编号
-            ax1.text(cej_point[0], cej_point[1] - 20, f'T{i+1}',
+            centroid = tuple(map(int, tooth['centroid']))
+            ax1.text(centroid[0], centroid[1] - 20, f'T{i+1}',
                     fontsize=10, color='yellow', fontweight='bold',
                     bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+
+        # 绘制全局CEJ线（上颌和下颌各一条）
+        if global_cej_data is not None:
+            upper_cej = global_cej_data.get('upper_cej')
+            lower_cej = global_cej_data.get('lower_cej')
+
+            # 绘制上颌CEJ线
+            if upper_cej is not None and 'curve' in upper_cej:
+                cej_curve = upper_cej['curve']
+                cej_x = [p[0] for p in cej_curve]
+                cej_y = [p[1] for p in cej_curve]
+                ax1.plot(cej_x, cej_y, 'b-', linewidth=4, alpha=0.9, label='上颌CEJ线')
+
+                # 绘制CEJ候选点
+                if 'points' in upper_cej:
+                    points = upper_cej['points']
+                    points_x = [p[0] for p in points]
+                    points_y = [p[1] for p in points]
+                    ax1.scatter(points_x, points_y, c='cyan', s=20, alpha=0.6, marker='o')
+
+            # 绘制下颌CEJ线
+            if lower_cej is not None and 'curve' in lower_cej:
+                cej_curve = lower_cej['curve']
+                cej_x = [p[0] for p in cej_curve]
+                cej_y = [p[1] for p in cej_curve]
+                ax1.plot(cej_x, cej_y, 'r-', linewidth=4, alpha=0.9, label='下颌CEJ线')
+
+                # 绘制CEJ候选点
+                if 'points' in lower_cej:
+                    points = lower_cej['points']
+                    points_x = [p[0] for p in points]
+                    points_y = [p[1] for p in points]
+                    ax1.scatter(points_x, points_y, c='orange', s=20, alpha=0.6, marker='o')
+
+            ax1.legend(loc='upper right', fontsize=10)
+        else:
+            # 如果没有全局CEJ数据，绘制单个牙齿的CEJ线（兼容旧方法）
+            for i, tooth in enumerate(teeth_data):
+                cej_curve = tooth.get('cej_curve', [])
+                cej_point = tooth.get('cej_point')
+
+                if len(cej_curve) >= 2:
+                    # 将CEJ曲线点转换为数组用于绘图
+                    cej_x = [p[0] for p in cej_curve]
+                    cej_y = [p[1] for p in cej_curve]
+                    ax1.plot(cej_x, cej_y, 'b-', linewidth=3, alpha=0.8, label=f'CEJ {i+1}' if i == 0 else '')
+
+                if cej_point is not None:
+                    # 绘制CEJ中心点
+                    ax1.plot(cej_point[0], cej_point[1], 'ro', markersize=8)
 
         # 2. CEJ线深度测量示意图
         ax2 = plt.subplot(2, 2, 2)
