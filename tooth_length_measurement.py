@@ -92,23 +92,36 @@ class ToothLengthMeasurement:
             self.unet_segmenter = None
             self.use_unet = False
 
-    def CCA_Analysis(self, orig_image, predict_image, erode_iteration=2, open_iteration=2):
+    def CCA_Analysis(self, orig_image, predict_image, erode_iteration=2, open_iteration=2,
+                     debug_output_dir=None, image_name='image'):
         """
-        连通组件分析 (CCA) - 完全复刻SerdarHelli实现
+        连通组件分析 (CCA) - 提取牙齿轮廓并计算长短轴位置
 
         参数:
             orig_image: 原始图像
             predict_image: 预测/分割后的图像
             erode_iteration: 腐蚀迭代次数
             open_iteration: 开运算迭代次数
+            debug_output_dir: debug图像输出目录（None则不保存）
+            image_name: 图像名称（用于debug文件命名）
 
         返回:
             result_image: 标注后的图像
-            teeth_count: 检测到的牙齿数量
+            teeth_data: 每颗牙齿的数据列表（包含轮廓和轴信息）
         """
         # 复制图像
         image = predict_image.copy()
         image2 = orig_image.copy()
+
+        # 保存debug图像的辅助函数
+        def save_debug_image(img, suffix, description):
+            if debug_output_dir is not None:
+                debug_path = os.path.join(debug_output_dir, f'{image_name}_debug_{suffix}.png')
+                cv2.imwrite(debug_path, img)
+                print(f"  ├─ {description}: {os.path.basename(debug_path)}")
+
+        # 保存UNet分割结果
+        save_debug_image(predict_image, '01_unet_segmentation', 'UNet分割结果')
 
         # 1. 形态学处理
         # 创建5x5卷积核
@@ -116,15 +129,18 @@ class ToothLengthMeasurement:
 
         # 开运算（先腐蚀后膨胀，用于去除噪声）
         image = cv2.morphologyEx(image, cv2.MORPH_OPEN, kernel1, iterations=open_iteration)
+        save_debug_image(image, '02_morphology_open', f'开运算(iter={open_iteration})')
 
         # 锐化滤波核
         kernel_sharpening = np.array([[-1, -1, -1],
                                       [-1,  9, -1],
                                       [-1, -1, -1]])
         image = cv2.filter2D(image, -1, kernel_sharpening)
+        save_debug_image(image, '03_sharpening', '锐化滤波')
 
         # 腐蚀操作
         image = cv2.erode(image, kernel1, iterations=erode_iteration)
+        save_debug_image(image, '04_erosion', f'腐蚀(iter={erode_iteration})')
 
         # 2. 转换为灰度图
         if len(image.shape) == 3:
@@ -132,6 +148,7 @@ class ToothLengthMeasurement:
 
         # 3. Otsu二值化
         thresh = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        save_debug_image(thresh, '05_otsu_threshold', 'Otsu二值化')
 
         # 4. 连通组件分析（8-连通）
         output = cv2.connectedComponentsWithStats(thresh, connectivity=8)
@@ -139,8 +156,16 @@ class ToothLengthMeasurement:
         labels = output[1]
         stats = output[2]
 
-        # 5. 遍历每个连通组件
-        teeth_count = 0
+        # 创建连通组件标签的彩色可视化
+        labels_vis = np.zeros_like(orig_image)
+        for label in range(1, num_labels):
+            mask = (labels == label).astype(np.uint8) * 255
+            color = np.random.randint(0, 255, 3).tolist()
+            labels_vis[labels == label] = color
+        save_debug_image(labels_vis, '06_connected_components', f'连通组件分析({num_labels-1}个组件)')
+
+        # 5. 遍历每个连通组件并保存牙齿数据
+        teeth_data = []
 
         for i in range(1, num_labels):  # 跳过背景（标签0）
             # 获取组件面积
@@ -148,8 +173,6 @@ class ToothLengthMeasurement:
 
             # 面积阈值：大于2000像素才认为是牙齿
             if c_area > 2000:
-                teeth_count += 1
-
                 # 创建单个组件的mask
                 componentMask = (labels == i).astype("uint8") * 255
 
@@ -174,50 +197,166 @@ class ToothLengthMeasurement:
                 (trbrX, trbrY) = midpoint(tr, br)  # 右边中点
 
                 # 8. 计算轴长（欧氏距离）
-                dA = dist.euclidean((tltrX, tltrY), (blbrX, blbrY))  # 长轴（通常）
-                dB = dist.euclidean((tlblX, tlblY), (trbrX, trbrY))  # 短轴（通常）
+                dA = dist.euclidean((tltrX, tltrY), (blbrX, blbrY))  # 主轴
+                dB = dist.euclidean((tlblX, tlblY), (trbrX, trbrY))  # 副轴
+
+                # 判断长轴和短轴
+                if dA >= dB:
+                    # dA是长轴，dB是短轴
+                    long_axis_start = (tltrX, tltrY)
+                    long_axis_end = (blbrX, blbrY)
+                    short_axis_start = (tlblX, tlblY)
+                    short_axis_end = (trbrX, trbrY)
+                    long_axis_length = dA
+                    short_axis_length = dB
+                else:
+                    # dB是长轴，dA是短轴
+                    long_axis_start = (tlblX, tlblY)
+                    long_axis_end = (trbrX, trbrY)
+                    short_axis_start = (tltrX, tltrY)
+                    short_axis_end = (blbrX, blbrY)
+                    long_axis_length = dB
+                    short_axis_length = dA
+
+                # 计算长轴方向向量（归一化）
+                long_axis_vector = np.array([
+                    long_axis_end[0] - long_axis_start[0],
+                    long_axis_end[1] - long_axis_start[1]
+                ])
+                long_axis_vector_norm = long_axis_vector / (np.linalg.norm(long_axis_vector) + 1e-6)
+
+                # 计算短轴方向向量（归一化）
+                short_axis_vector = np.array([
+                    short_axis_end[0] - short_axis_start[0],
+                    short_axis_end[1] - short_axis_start[1]
+                ])
+                short_axis_vector_norm = short_axis_vector / (np.linalg.norm(short_axis_vector) + 1e-6)
 
                 # 转换为毫米
-                dA_mm = dA / self.pixels_per_mm
-                dB_mm = dB / self.pixels_per_mm
+                long_axis_mm = long_axis_length / self.pixels_per_mm
+                short_axis_mm = short_axis_length / self.pixels_per_mm
+
+                # 计算轮廓中心
+                M = cv2.moments(c)
+                if M["m00"] != 0:
+                    cX = int(M["m10"] / M["m00"])
+                    cY = int(M["m01"] / M["m00"])
+                else:
+                    cX, cY = int((tl[0] + br[0]) / 2), int((tl[1] + br[1]) / 2)
+
+                # 保存牙齿数据
+                tooth_info = {
+                    'id': len(teeth_data) + 1,
+                    'contour': c,
+                    'mask': componentMask,
+                    'area': c_area,
+                    'center': (cX, cY),
+                    'box': box,
+                    'box_vertices': {
+                        'tl': tl, 'tr': tr, 'br': br, 'bl': bl
+                    },
+                    'long_axis': {
+                        'start': long_axis_start,
+                        'end': long_axis_end,
+                        'vector': long_axis_vector_norm,
+                        'length_px': long_axis_length,
+                        'length_mm': long_axis_mm
+                    },
+                    'short_axis': {
+                        'start': short_axis_start,
+                        'end': short_axis_end,
+                        'vector': short_axis_vector_norm,
+                        'length_px': short_axis_length,
+                        'length_mm': short_axis_mm
+                    }
+                }
+                teeth_data.append(tooth_info)
+
+                # 保存每个牙齿的单独debug图像
+                if debug_output_dir is not None:
+                    tooth_id = len(teeth_data)
+                    # 单独mask
+                    tooth_debug_path = os.path.join(debug_output_dir,
+                                                   f'{image_name}_debug_07_tooth_{tooth_id:02d}_mask.png')
+                    cv2.imwrite(tooth_debug_path, componentMask)
+
+                    # 轮廓+外接矩形
+                    tooth_vis = orig_image.copy()
+                    cv2.drawContours(tooth_vis, [c], -1, (0, 255, 0), 2)
+                    cv2.drawContours(tooth_vis, [box.astype("int")], -1, (255, 200, 0), 2)
+                    tooth_vis_path = os.path.join(debug_output_dir,
+                                                  f'{image_name}_debug_08_tooth_{tooth_id:02d}_contour.png')
+                    cv2.imwrite(tooth_vis_path, tooth_vis)
+
+                    # 轮廓+轴线
+                    tooth_axis = orig_image.copy()
+                    cv2.drawContours(tooth_axis, [c], -1, (0, 255, 0), 2)
+                    cv2.line(tooth_axis,
+                            (int(long_axis_start[0]), int(long_axis_start[1])),
+                            (int(long_axis_end[0]), int(long_axis_end[1])),
+                            (0, 0, 255), 3)
+                    cv2.circle(tooth_axis, (int(long_axis_start[0]), int(long_axis_start[1])), 5, (0, 0, 255), -1)
+                    cv2.circle(tooth_axis, (int(long_axis_end[0]), int(long_axis_end[1])), 5, (0, 0, 255), -1)
+                    cv2.line(tooth_axis,
+                            (int(short_axis_start[0]), int(short_axis_start[1])),
+                            (int(short_axis_end[0]), int(short_axis_end[1])),
+                            (255, 0, 0), 3)
+                    cv2.circle(tooth_axis, (int(short_axis_start[0]), int(short_axis_start[1])), 5, (255, 0, 0), -1)
+                    cv2.circle(tooth_axis, (int(short_axis_end[0]), int(short_axis_end[1])), 5, (255, 0, 0), -1)
+                    tooth_axis_path = os.path.join(debug_output_dir,
+                                                   f'{image_name}_debug_09_tooth_{tooth_id:02d}_axes.png')
+                    cv2.imwrite(tooth_axis_path, tooth_axis)
 
                 # 9. 可视化绘制
-                # 绘制轮廓
-                cv2.drawContours(image2, [box.astype("int")], -1, (0, 255, 0), 2)
+                # 绘制完整的牙齿轮廓（绿色）
+                cv2.drawContours(image2, [c], -1, (0, 255, 0), 2)
 
-                # 绘制四个顶点
-                for (x, y) in box:
-                    cv2.circle(image2, (int(x), int(y)), 5, (255, 0, 0), -1)
+                # 绘制最小外接矩形（浅蓝色虚线，参考用）
+                # cv2.drawContours(image2, [box.astype("int")], -1, (255, 200, 0), 1)
 
-                # 绘制中点
-                cv2.circle(image2, (int(tltrX), int(tltrY)), 5, (255, 0, 0), -1)
-                cv2.circle(image2, (int(blbrX), int(blbrY)), 5, (255, 0, 0), -1)
-                cv2.circle(image2, (int(tlblX), int(tlblY)), 5, (255, 0, 0), -1)
-                cv2.circle(image2, (int(trbrX), int(trbrY)), 5, (255, 0, 0), -1)
+                # 绘制长轴（红色粗线）
+                cv2.line(image2,
+                        (int(long_axis_start[0]), int(long_axis_start[1])),
+                        (int(long_axis_end[0]), int(long_axis_end[1])),
+                        (0, 0, 255), 3)
 
-                # 绘制连接线（长轴）
-                cv2.line(image2, (int(tltrX), int(tltrY)), (int(blbrX), int(blbrY)),
-                        (255, 0, 255), 2)
-                # 绘制连接线（短轴）
-                cv2.line(image2, (int(tlblX), int(tlblY)), (int(trbrX), int(trbrY)),
-                        (255, 0, 255), 2)
+                # 绘制长轴端点（红色圆点）
+                cv2.circle(image2, (int(long_axis_start[0]), int(long_axis_start[1])), 5, (0, 0, 255), -1)
+                cv2.circle(image2, (int(long_axis_end[0]), int(long_axis_end[1])), 5, (0, 0, 255), -1)
 
-                # 10. 标注尺寸
-                # 长轴标注
-                cv2.putText(image2, "{:.1f}mm".format(dA_mm),
-                           (int(tltrX - 15), int(tltrY - 10)), cv2.FONT_HERSHEY_SIMPLEX,
-                           0.55, (255, 255, 0), 2)
-                # 短轴标注
-                cv2.putText(image2, "{:.1f}mm".format(dB_mm),
-                           (int(trbrX + 10), int(trbrY)), cv2.FONT_HERSHEY_SIMPLEX,
-                           0.55, (255, 255, 0), 2)
+                # 绘制短轴（蓝色粗线）
+                cv2.line(image2,
+                        (int(short_axis_start[0]), int(short_axis_start[1])),
+                        (int(short_axis_end[0]), int(short_axis_end[1])),
+                        (255, 0, 0), 3)
 
-                # 标注牙齿编号
-                cv2.putText(image2, "#{} ".format(teeth_count),
-                           (int(tltrX - 15), int(tltrY - 30)), cv2.FONT_HERSHEY_SIMPLEX,
-                           0.65, (255, 0, 255), 2)
+                # 绘制短轴端点（蓝色圆点）
+                cv2.circle(image2, (int(short_axis_start[0]), int(short_axis_start[1])), 5, (255, 0, 0), -1)
+                cv2.circle(image2, (int(short_axis_end[0]), int(short_axis_end[1])), 5, (255, 0, 0), -1)
 
-        return image2, teeth_count
+                # 绘制中心点（黄色圆点）
+                cv2.circle(image2, (cX, cY), 6, (0, 255, 255), -1)
+
+                # 10. 标注信息
+                # 长轴标注（红色文字）
+                cv2.putText(image2, "L:{:.1f}mm".format(long_axis_mm),
+                           (int(long_axis_start[0] - 15), int(long_axis_start[1] - 10)),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+                # 短轴标注（蓝色文字）
+                cv2.putText(image2, "S:{:.1f}mm".format(short_axis_mm),
+                           (int(short_axis_start[0] + 10), int(short_axis_start[1])),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+                # 牙齿编号（黄色文字）
+                cv2.putText(image2, "#{}".format(len(teeth_data)),
+                           (cX - 15, cY - 20), cv2.FONT_HERSHEY_SIMPLEX,
+                           0.7, (0, 255, 255), 2)
+
+        # 保存最终结果
+        save_debug_image(image2, '10_final_result', f'最终结果(检测到{len(teeth_data)}颗牙齿)')
+
+        return image2, teeth_data
 
     def analyze_single_image(self, image_path, output_dir='output'):
         """
@@ -255,26 +394,69 @@ class ToothLengthMeasurement:
             _, predict_image = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             predict_image = cv2.bitwise_not(predict_image)
 
-        # 2. 执行CCA分析（复刻SerdarHelli）
+        # 2. 执行CCA分析（启用debug输出）
         print("正在进行连通组件分析（CCA）...")
-        result_image, teeth_count = self.CCA_Analysis(
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        os.makedirs(output_dir, exist_ok=True)
+
+        print(f"\n  Debug图像输出:")
+        result_image, teeth_data = self.CCA_Analysis(
             original_image,
             predict_image,
             erode_iteration=2,
-            open_iteration=2
+            open_iteration=2,
+            debug_output_dir=output_dir,
+            image_name=base_name
         )
+        print()
 
+        teeth_count = len(teeth_data)
         print(f"✓ 检测到 {teeth_count} 颗牙齿")
 
+        # 打印每颗牙齿的轴信息
+        for tooth in teeth_data:
+            print(f"  牙齿 #{tooth['id']}:")
+            print(f"    长轴: {tooth['long_axis']['length_mm']:.1f}mm, 位置: {tooth['long_axis']['start']} -> {tooth['long_axis']['end']}")
+            print(f"    短轴: {tooth['short_axis']['length_mm']:.1f}mm, 位置: {tooth['short_axis']['start']} -> {tooth['short_axis']['end']}")
+
         # 3. 保存结果
-        os.makedirs(output_dir, exist_ok=True)
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-        output_path = os.path.join(output_dir, f'{base_name}_tooth_length.png')
+        output_path = os.path.join(output_dir, f'{base_name}_tooth_axis.png')
 
         cv2.imwrite(output_path, result_image)
-        print(f"✓ 结果已保存: {output_path}")
+        print(f"✓ 可视化结果已保存: {output_path}")
 
-        return result_image, teeth_count
+        # 4. 保存轴数据到JSON
+        import json
+        axes_data = {
+            'image': os.path.basename(image_path),
+            'teeth_count': teeth_count,
+            'teeth': []
+        }
+
+        for tooth in teeth_data:
+            axes_data['teeth'].append({
+                'id': tooth['id'],
+                'center': tooth['center'],
+                'long_axis': {
+                    'start': [float(tooth['long_axis']['start'][0]), float(tooth['long_axis']['start'][1])],
+                    'end': [float(tooth['long_axis']['end'][0]), float(tooth['long_axis']['end'][1])],
+                    'vector': [float(tooth['long_axis']['vector'][0]), float(tooth['long_axis']['vector'][1])],
+                    'length_mm': float(tooth['long_axis']['length_mm'])
+                },
+                'short_axis': {
+                    'start': [float(tooth['short_axis']['start'][0]), float(tooth['short_axis']['start'][1])],
+                    'end': [float(tooth['short_axis']['end'][0]), float(tooth['short_axis']['end'][1])],
+                    'vector': [float(tooth['short_axis']['vector'][0]), float(tooth['short_axis']['vector'][1])],
+                    'length_mm': float(tooth['short_axis']['length_mm'])
+                }
+            })
+
+        json_path = os.path.join(output_dir, f'{base_name}_tooth_axes.json')
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(axes_data, f, indent=2, ensure_ascii=False)
+        print(f"✓ 轴位置数据已保存: {json_path}")
+
+        return result_image, teeth_data
 
     def process_input_folder(self, input_folder='input', output_folder='output'):
         """
@@ -312,12 +494,14 @@ class ToothLengthMeasurement:
 
         for i, image_path in enumerate(image_files):
             print(f"\n[{i+1}/{len(image_files)}]")
-            result_image, teeth_count = self.analyze_single_image(image_path, output_folder)
+            result_image, teeth_data = self.analyze_single_image(image_path, output_folder)
 
             if result_image is not None:
+                teeth_count = len(teeth_data)
                 results.append({
                     'image_path': image_path,
-                    'teeth_count': teeth_count
+                    'teeth_count': teeth_count,
+                    'teeth_data': teeth_data
                 })
                 total_teeth += teeth_count
 
