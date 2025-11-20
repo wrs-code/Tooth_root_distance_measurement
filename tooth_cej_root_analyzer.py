@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-牙齿CEJ线检测与根部距离测量系统
+牙齿根部距离测量系统（形态学方法）
 基于全景X光片的牙齿分析，包括：
 1. 牙齿边缘检测和分割（使用U-Net深度学习模型）
-2. CEJ线（釉牙骨质界）识别
-3. 基于CEJ线法线方向的深度测量
+2. 牙齿长轴计算（参考SerdarHelli/CCA_Analysis.py）
+3. 牙齿间隙骨嵴边界检测（形态学方法）
+4. 沿牙齿长轴的根部间距测量
 """
 
 import cv2
@@ -28,7 +29,7 @@ plt.rcParams['axes.unicode_minus'] = False
 
 
 class ToothCEJAnalyzer:
-    """牙齿CEJ线分析器"""
+    """牙齿根部距离分析器（形态学方法）"""
 
     def __init__(self):
         # 间距阈值 (mm)
@@ -75,6 +76,133 @@ class ToothCEJAnalyzer:
         rect[3] = pts[np.argmax(diff)]
 
         return rect
+
+    def midpoint(self, ptA, ptB):
+        """
+        计算两点的中点（参考SerdarHelli/CCA_Analysis.py）
+
+        参数:
+            ptA: 第一个点 (x, y)
+            ptB: 第二个点 (x, y)
+
+        返回:
+            中点坐标 (x, y)
+        """
+        return ((ptA[0] + ptB[0]) * 0.5, (ptA[1] + ptB[1]) * 0.5)
+
+    def compute_tooth_long_axis(self, tooth_data, debug_dir=None, tooth_id=None):
+        """
+        计算牙齿的长轴方向和关键点（参考SerdarHelli/CCA_Analysis.py）
+
+        参数:
+            tooth_data: 牙齿数据
+            debug_dir: debug目录（可选）
+            tooth_id: 牙齿ID（用于debug文件命名）
+
+        返回:
+            long_axis_data: 包含长轴信息的字典
+        """
+        contour = tooth_data['contour']
+
+        # 计算最小外接矩形
+        rect = cv2.minAreaRect(contour)
+        box = cv2.boxPoints(rect)
+        box = np.array(box, dtype=np.float32)
+
+        # 排序顶点：左上、右上、右下、左下
+        box = self.order_points(box)
+        (tl, tr, br, bl) = box
+
+        # 计算四条边的中点
+        top_mid = self.midpoint(tl, tr)      # 上边中点
+        bottom_mid = self.midpoint(bl, br)   # 下边中点
+        left_mid = self.midpoint(tl, bl)     # 左边中点
+        right_mid = self.midpoint(tr, br)    # 右边中点
+
+        # 计算两个轴的长度
+        dA = dist.euclidean(top_mid, bottom_mid)   # 主轴长度
+        dB = dist.euclidean(left_mid, right_mid)   # 副轴长度
+
+        # 长轴是较长的那个
+        if dA >= dB:
+            # 主轴为长轴（通常是牙齿的竖直方向）
+            axis_start = top_mid
+            axis_end = bottom_mid
+            axis_length = dA
+            is_vertical = True
+        else:
+            # 副轴为长轴（水平方向）
+            axis_start = left_mid
+            axis_end = right_mid
+            axis_length = dB
+            is_vertical = False
+
+        # 计算长轴方向向量（归一化）
+        axis_vector = np.array([
+            axis_end[0] - axis_start[0],
+            axis_end[1] - axis_start[1]
+        ])
+        axis_vector_norm = axis_vector / (np.linalg.norm(axis_vector) + 1e-6)
+
+        # 确保长轴指向下方（牙根方向）
+        if axis_vector_norm[1] < 0:  # y方向向上
+            axis_vector_norm = -axis_vector_norm
+            axis_start, axis_end = axis_end, axis_start
+
+        long_axis_data = {
+            'box': box,
+            'top_mid': top_mid,
+            'bottom_mid': bottom_mid,
+            'left_mid': left_mid,
+            'right_mid': right_mid,
+            'axis_start': axis_start,
+            'axis_end': axis_end,
+            'axis_vector': axis_vector_norm,
+            'axis_length': axis_length,
+            'is_vertical': is_vertical
+        }
+
+        # 保存debug可视化
+        if debug_dir is not None and tooth_id is not None:
+            self._save_long_axis_debug(tooth_data, long_axis_data, debug_dir, tooth_id)
+
+        return long_axis_data
+
+    def _save_long_axis_debug(self, tooth_data, long_axis_data, debug_dir, tooth_id):
+        """保存长轴debug可视化"""
+        # 创建可视化图像
+        h, w = tooth_data['mask'].shape
+        vis = np.zeros((h, w, 3), dtype=np.uint8)
+
+        # 绘制牙齿轮廓
+        cv2.drawContours(vis, [tooth_data['contour']], -1, (255, 255, 255), 2)
+
+        # 绘制最小外接矩形
+        box_int = np.array(long_axis_data['box'], dtype=np.int32)
+        cv2.drawContours(vis, [box_int], 0, (0, 255, 0), 2)
+
+        # 绘制四个中点
+        for point_name, point in [
+            ('top_mid', long_axis_data['top_mid']),
+            ('bottom_mid', long_axis_data['bottom_mid']),
+            ('left_mid', long_axis_data['left_mid']),
+            ('right_mid', long_axis_data['right_mid'])
+        ]:
+            cv2.circle(vis, (int(point[0]), int(point[1])), 5, (255, 255, 0), -1)
+
+        # 绘制长轴（蓝色粗线）
+        start = long_axis_data['axis_start']
+        end = long_axis_data['axis_end']
+        cv2.line(vis, (int(start[0]), int(start[1])),
+                (int(end[0]), int(end[1])), (255, 0, 0), 3)
+
+        # 绘制箭头指向牙根
+        cv2.arrowedLine(vis, (int(start[0]), int(start[1])),
+                       (int(end[0]), int(end[1])), (0, 0, 255), 2, tipLength=0.3)
+
+        # 保存
+        output_path = os.path.join(debug_dir, f'tooth_{tooth_id}_long_axis.png')
+        cv2.imwrite(output_path, vis)
 
     def preprocess_image(self, image):
         """
@@ -337,6 +465,150 @@ class ToothCEJAnalyzer:
         cv2.fillPoly(roi_mask, [convex_hull], 255)
 
         return convex_hull, roi_mask, teeth_mask
+
+    def create_gap_mask(self, tooth1_mask, tooth2_mask, expansion=10):
+        """
+        创建两颗牙齿之间的间隙mask
+
+        参数:
+            tooth1_mask: 第一颗牙齿的mask
+            tooth2_mask: 第二颗牙齿的mask
+            expansion: 向外扩展的像素数
+
+        返回:
+            gap_mask: 间隙区域的mask
+        """
+        # 合并两颗牙齿的mask
+        combined_mask = cv2.bitwise_or(tooth1_mask, tooth2_mask)
+
+        # 膨胀合并后的mask，创建搜索区域
+        kernel = np.ones((expansion*2+1, expansion*2+1), np.uint8)
+        expanded_mask = cv2.dilate(combined_mask, kernel, iterations=1)
+
+        # 间隙区域 = 扩展区域 - 原始牙齿区域
+        gap_mask = cv2.subtract(expanded_mask, combined_mask)
+
+        return gap_mask
+
+    def detect_bone_crest_in_gap(self, image, gap_mask, tooth1_axis_data, tooth2_axis_data,
+                                 debug_dir=None, gap_id=None):
+        """
+        在牙齿间隙检测骨嵴点（牙槽骨边界）
+
+        算法流程：
+        1. 在间隙区域应用边缘检测
+        2. 找到最靠近牙根末端的边缘点（骨嵴位置）
+        3. 返回骨嵴点及其相关信息
+
+        参数:
+            image: 原始图像
+            gap_mask: 间隙区域mask
+            tooth1_axis_data: 第一颗牙齿的长轴数据
+            tooth2_axis_data: 第二颗牙齿的长轴数据
+            debug_dir: debug目录
+            gap_id: 间隙ID
+
+        返回:
+            bone_crest_data: 骨嵴数据字典
+        """
+        # 1. 在间隙区域应用边缘检测
+        gap_image = cv2.bitwise_and(image, image, mask=gap_mask)
+        gap_edges = cv2.Canny(gap_image, 50, 150)
+
+        # 2. 提取边缘点
+        edge_coords = np.column_stack(np.where(gap_edges > 0))  # (y, x)
+        edge_points = [(x, y) for y, x in edge_coords]
+
+        if len(edge_points) == 0:
+            return None
+
+        # 3. 确定搜索区域（基于两颗牙齿的根部位置）
+        # 取两颗牙齿长轴末端的中间高度作为参考
+        root1_y = tooth1_axis_data['axis_end'][1]
+        root2_y = tooth2_axis_data['axis_end'][1]
+        ref_y = (root1_y + root2_y) / 2
+
+        # 4. 找到最接近参考高度的边缘点（骨嵴点）
+        # 骨嵴通常在牙根附近，但略高于牙根末端
+        search_range = 50  # 搜索范围（像素）
+
+        # 筛选在搜索范围内的点
+        candidate_points = [
+            p for p in edge_points
+            if abs(p[1] - ref_y) < search_range
+        ]
+
+        if len(candidate_points) == 0:
+            # 如果没有找到，使用所有点中y坐标最小的（最高的）
+            candidate_points = edge_points
+
+        # 找到最高的点（y坐标最小）作为骨嵴点
+        bone_crest_point = min(candidate_points, key=lambda p: p[1])
+
+        # 5. 计算X方向的中心点
+        # 在骨嵴高度附近，找到所有边缘点的X坐标范围
+        y_threshold = 10
+        points_at_crest = [
+            p for p in edge_points
+            if abs(p[1] - bone_crest_point[1]) < y_threshold
+        ]
+
+        if len(points_at_crest) > 0:
+            # 使用中位数x坐标
+            x_coords = [p[0] for p in points_at_crest]
+            median_x = int(np.median(x_coords))
+            bone_crest_point = (median_x, bone_crest_point[1])
+
+        bone_crest_data = {
+            'point': bone_crest_point,
+            'ref_y': ref_y,
+            'edge_points': edge_points,
+            'points_at_crest': points_at_crest
+        }
+
+        # Debug可视化
+        if debug_dir is not None and gap_id is not None:
+            self._save_gap_detection_debug(
+                image, gap_mask, gap_edges, bone_crest_data,
+                tooth1_axis_data, tooth2_axis_data,
+                debug_dir, gap_id
+            )
+
+        return bone_crest_data
+
+    def _save_gap_detection_debug(self, image, gap_mask, gap_edges, bone_crest_data,
+                                  tooth1_axis_data, tooth2_axis_data, debug_dir, gap_id):
+        """保存间隙检测debug可视化"""
+        # 创建可视化图像
+        vis = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if len(image.shape) == 2 else image.copy()
+
+        # 应用gap mask（半透明蓝色）
+        gap_overlay = vis.copy()
+        gap_overlay[gap_mask > 0] = [255, 100, 0]  # 蓝色
+        vis = cv2.addWeighted(vis, 0.7, gap_overlay, 0.3, 0)
+
+        # 绘制两颗牙齿的根部末端
+        root1 = tooth1_axis_data['axis_end']
+        root2 = tooth2_axis_data['axis_end']
+        cv2.circle(vis, (int(root1[0]), int(root1[1])), 6, (0, 255, 0), -1)
+        cv2.circle(vis, (int(root2[0]), int(root2[1])), 6, (0, 255, 0), -1)
+
+        # 绘制参考线
+        ref_y = int(bone_crest_data['ref_y'])
+        cv2.line(vis, (0, ref_y), (vis.shape[1], ref_y), (255, 255, 0), 1)
+
+        # 绘制所有边缘点（黄色小点）
+        for x, y in bone_crest_data['edge_points']:
+            cv2.circle(vis, (x, y), 1, (0, 255, 255), -1)
+
+        # 绘制骨嵴点（红色大圆圈）
+        crest_point = bone_crest_data['point']
+        cv2.circle(vis, crest_point, 8, (0, 0, 255), 3)
+        cv2.circle(vis, crest_point, 2, (255, 255, 255), -1)
+
+        # 保存
+        output_path = os.path.join(debug_dir, f'gap_{gap_id}_bone_crest.png')
+        cv2.imwrite(output_path, vis)
 
     def create_alveolar_bone_image(self, image, roi_mask, teeth_mask, buffer_pixels=5):
         """
@@ -1002,6 +1274,124 @@ class ToothCEJAnalyzer:
 
         return depth_profile
 
+    def measure_root_spacing_along_axis(self, tooth1_data, tooth2_data, bone_crest_point,
+                                        tooth1_axis, tooth2_axis, debug_dir=None, pair_id=None):
+        """
+        沿牙齿长轴测量牙根间距（新方法 - 基于形态学）
+
+        算法流程：
+        1. 从骨嵴点开始，沿两颗牙齿的长轴向下采样
+        2. 在每个深度，找到牙齿边缘的最近点
+        3. 计算两颗牙齿之间的距离
+
+        参数:
+            tooth1_data: 第一颗牙齿数据
+            tooth2_data: 第二颗牙齿数据
+            bone_crest_point: 骨嵴点（起始测量点）
+            tooth1_axis: 第一颗牙齿的长轴数据
+            tooth2_axis: 第二颗牙齿的长轴数据
+            debug_dir: debug目录
+            pair_id: 牙齿对ID
+
+        返回:
+            spacing_profile: 间距轮廓数据
+        """
+        max_depth_mm = 15
+        max_depth_pixels = int(max_depth_mm * self.pixels_per_mm)
+
+        spacing_profile = {
+            'depths': [],
+            'spacings': [],
+            'colors': [],
+            'tooth1_edges': [],
+            'tooth2_edges': [],
+            'measurement_lines': []
+        }
+
+        # 采样步长（每0.5mm）
+        step_pixels = int(self.pixels_per_mm * 0.5)
+
+        # 从骨嵴点开始向下采样
+        for depth_pixel in range(0, max_depth_pixels, step_pixels):
+            depth_mm = depth_pixel / self.pixels_per_mm
+
+            # 沿第一颗牙齿的长轴向下移动
+            tooth1_point = np.array(bone_crest_point) + tooth1_axis['axis_vector'] * depth_pixel
+
+            # 沿第二颗牙齿的长轴向下移动
+            tooth2_point = np.array(bone_crest_point) + tooth2_axis['axis_vector'] * depth_pixel
+
+            # 在tooth1的轮廓上找最近的边缘点
+            contour1 = tooth1_data['contour'].reshape(-1, 2)
+            dists1 = np.linalg.norm(contour1 - tooth1_point, axis=1)
+            nearest_idx1 = np.argmin(dists1)
+            edge1 = tuple(contour1[nearest_idx1].astype(int))
+
+            # 在tooth2的轮廓上找最近的边缘点
+            contour2 = tooth2_data['contour'].reshape(-1, 2)
+            dists2 = np.linalg.norm(contour2 - tooth2_point, axis=1)
+            nearest_idx2 = np.argmin(dists2)
+            edge2 = tuple(contour2[nearest_idx2].astype(int))
+
+            # 计算两个边缘点之间的距离
+            spacing_pixels = dist.euclidean(edge1, edge2)
+            spacing_mm = spacing_pixels / self.pixels_per_mm
+
+            # 只保留合理的间距（避免牙齿重叠区域）
+            if spacing_mm >= 0 and spacing_mm < 30:
+                # 获取颜色编码
+                color, _ = self.get_color_for_spacing(spacing_mm)
+
+                spacing_profile['depths'].append(depth_mm)
+                spacing_profile['spacings'].append(spacing_mm)
+                spacing_profile['colors'].append(color)
+                spacing_profile['tooth1_edges'].append(edge1)
+                spacing_profile['tooth2_edges'].append(edge2)
+                spacing_profile['measurement_lines'].append((edge1, edge2))
+
+        # Debug可视化
+        if debug_dir is not None and pair_id is not None:
+            self._save_spacing_measurement_debug(
+                tooth1_data, tooth2_data, bone_crest_point,
+                spacing_profile, debug_dir, pair_id
+            )
+
+        return spacing_profile
+
+    def _save_spacing_measurement_debug(self, tooth1_data, tooth2_data, bone_crest_point,
+                                       spacing_profile, debug_dir, pair_id):
+        """保存间距测量debug可视化"""
+        # 创建空白图像
+        h = max(tooth1_data['mask'].shape[0], tooth2_data['mask'].shape[0])
+        w = max(tooth1_data['mask'].shape[1], tooth2_data['mask'].shape[1])
+        vis = np.zeros((h, w, 3), dtype=np.uint8)
+
+        # 绘制两颗牙齿轮廓
+        cv2.drawContours(vis, [tooth1_data['contour']], -1, (255, 255, 255), 2)
+        cv2.drawContours(vis, [tooth2_data['contour']], -1, (255, 255, 255), 2)
+
+        # 绘制骨嵴点
+        cv2.circle(vis, bone_crest_point, 8, (0, 255, 255), -1)
+
+        # 绘制所有测量线（颜色编码）
+        for i, (edge1, edge2) in enumerate(spacing_profile['measurement_lines']):
+            # 根据间距获取颜色
+            color_hex = spacing_profile['colors'][i]
+            # 将hex颜色转换为BGR
+            color_rgb = tuple(int(color_hex[j:j+2], 16) for j in (1, 3, 5))
+            color_bgr = (color_rgb[2], color_rgb[1], color_rgb[0])
+
+            # 绘制测量线
+            cv2.line(vis, edge1, edge2, color_bgr, 2)
+
+            # 绘制端点
+            cv2.circle(vis, edge1, 3, (255, 255, 255), -1)
+            cv2.circle(vis, edge2, 3, (255, 255, 255), -1)
+
+        # 保存
+        output_path = os.path.join(debug_dir, f'pair_{pair_id}_spacing_measurement.png')
+        cv2.imwrite(output_path, vis)
+
     def measure_spacing_between_teeth(self, tooth1_data, tooth2_data, cej1_point, cej2_point,
                                      cej1_normal, cej2_normal, max_depth_mm=15):
         """
@@ -1092,13 +1482,13 @@ class ToothCEJAnalyzer:
 
     def analyze_single_image(self, image_path, output_dir='output'):
         """
-        分析单张全景X光图像
+        分析单张全景X光图像（新方法 - 形态学+间隙检测）
 
-        使用简化的边界线检测算法：
-        1. 创建凸包ROI
-        2. 检测边缘
-        3. 清除牙齿内部边缘
-        4. 拟合曲线
+        流程：
+        1. U-Net检测牙齿
+        2. 计算每颗牙齿的长轴（参考SerdarHelli/CCA_Analysis.py）
+        3. 在牙齿间隙检测骨嵴边界
+        4. 沿长轴测量牙根间距
 
         参数:
             image_path: 图像路径
@@ -1125,7 +1515,6 @@ class ToothCEJAnalyzer:
 
         # 检测牙齿轮廓
         print("正在检测牙齿轮廓...")
-        # 如果使用U-Net，传入原始图像；否则使用预处理后的图像
         if self.use_unet:
             teeth_data = self.detect_teeth_contours(original_image)
         else:
@@ -1142,101 +1531,44 @@ class ToothCEJAnalyzer:
         os.makedirs(debug_dir, exist_ok=True)
         print(f"Debug图像将保存到: {debug_dir}")
 
-        # 使用新的简化边界线检测方法
-        print("正在检测牙根边界线...")
-        upper_boundary, lower_boundary = self.detect_root_boundary_lines(
-            teeth_data, processed, original_image.shape, debug_dir=debug_dir
-        )
-
-        # 为每颗牙齿分配边界线信息
+        # 计算每颗牙齿的长轴
+        print("正在计算牙齿长轴...")
         for i, tooth in enumerate(teeth_data):
-            # 确定牙齿属于上颌还是下颌
-            if upper_boundary is not None and lower_boundary is not None:
-                # 判断牙齿属于哪个颌
-                is_upper = any(t['label'] == tooth['label'] for t in upper_boundary['teeth'])
-                boundary_data = upper_boundary if is_upper else lower_boundary
-            elif upper_boundary is not None:
-                boundary_data = upper_boundary
-            elif lower_boundary is not None:
-                boundary_data = lower_boundary
-            else:
-                # 如果没有检测到边界线，使用简单的估计
-                print(f"  警告：无法检测边界线，使用简单估计")
-                x, y, w, h = tooth['bbox']
-                cej_y = y + int(h * 0.4)
-                tooth['cej_curve'] = [(x, cej_y), (x + w, cej_y)]
-                tooth['cej_point'] = (int(x + w / 2), cej_y)
-                tooth['cej_normal'] = np.array([0, 1])
-                continue
-
-            # 从边界线曲线中找到该牙齿对应的点
-            tooth_x = tooth['centroid'][0]
-            boundary_curve = boundary_data['curve']
-
-            # 找到最接近牙齿X坐标的点
-            closest_points = []
-            for point in boundary_curve:
-                if abs(point[0] - tooth_x) < tooth['bbox'][2] / 2:
-                    closest_points.append(point)
-
-            if len(closest_points) > 0:
-                # 使用这些点作为该牙齿的边界点
-                tooth['cej_curve'] = closest_points
-                avg_x = int(np.mean([p[0] for p in closest_points]))
-                avg_y = int(np.mean([p[1] for p in closest_points]))
-                tooth['cej_point'] = (avg_x, avg_y)
-
-                # 计算法线
-                poly_coeffs = boundary_data['coeffs']
-                poly_derivative = np.polyder(poly_coeffs)
-                slope = np.polyval(poly_derivative, avg_x)
-                tangent = np.array([1.0, slope])
-                tangent = tangent / np.linalg.norm(tangent)
-                cej_normal = np.array([-tangent[1], tangent[0]])
-                if cej_normal[1] < 0:
-                    cej_normal = -cej_normal
-                tooth['cej_normal'] = cej_normal
-            else:
-                # 使用曲线上最近的点
-                min_dist = float('inf')
-                closest_point = boundary_curve[0]
-                for point in boundary_curve:
-                    dist = abs(point[0] - tooth_x)
-                    if dist < min_dist:
-                        min_dist = dist
-                        closest_point = point
-                tooth['cej_curve'] = [closest_point]
-                tooth['cej_point'] = closest_point
-                tooth['cej_normal'] = np.array([0, 1])
-
-        # 保存边界线数据
-        boundary_data = {
-            'upper_boundary': upper_boundary,
-            'lower_boundary': lower_boundary
-        }
-
-        # 测量每颗牙齿的根部深度
-        print("正在测量牙根深度...")
-        for i, tooth in enumerate(teeth_data):
-            depth_profile = self.measure_root_depth_along_normal(
-                tooth, tooth['cej_point'], tooth['cej_normal']
+            long_axis_data = self.compute_tooth_long_axis(
+                tooth, debug_dir=debug_dir, tooth_id=i+1
             )
-            tooth['depth_profile'] = depth_profile
-            if len(depth_profile['depths']) > 0:
-                max_depth = max(depth_profile['depths'])
-                print(f"  牙齿 {i+1}: 根部深度 {max_depth:.1f}mm")
+            tooth['long_axis'] = long_axis_data
+            print(f"  牙齿 {i+1}: 长轴长度 {long_axis_data['axis_length']/self.pixels_per_mm:.1f}mm")
 
-        # 测量相邻牙齿间距
-        print("正在测量牙齿间距...")
+        # 测量相邻牙齿间距（使用新方法）
+        print("正在测量牙根间距（基于间隙骨嵴检测）...")
         spacing_results = []
+
         for i in range(len(teeth_data) - 1):
             tooth1 = teeth_data[i]
             tooth2 = teeth_data[i + 1]
 
-            spacing_profile = self.measure_spacing_between_teeth(
-                tooth1, tooth2,
-                tooth1['cej_point'], tooth2['cej_point'],
-                tooth1['cej_normal'], tooth2['cej_normal']
+            print(f"  处理牙齿对 {i+1}-{i+2}...")
+
+            # 创建间隙mask
+            gap_mask = self.create_gap_mask(tooth1['mask'], tooth2['mask'], expansion=10)
+
+            # 检测间隙中的骨嵴点
+            bone_crest_data = self.detect_bone_crest_in_gap(
+                processed, gap_mask,
+                tooth1['long_axis'], tooth2['long_axis'],
+                debug_dir=debug_dir, gap_id=f"{i+1}_{i+2}"
+            )
+
+            if bone_crest_data is None:
+                print(f"    ⚠ 无法检测骨嵴点，跳过")
+                continue
+
+            # 沿长轴测量间距
+            spacing_profile = self.measure_root_spacing_along_axis(
+                tooth1, tooth2, bone_crest_data['point'],
+                tooth1['long_axis'], tooth2['long_axis'],
+                debug_dir=debug_dir, pair_id=f"{i+1}_{i+2}"
             )
 
             if len(spacing_profile['spacings']) > 0:
@@ -1249,23 +1581,168 @@ class ToothCEJAnalyzer:
                     'profile': spacing_profile,
                     'min_spacing': min_spacing,
                     'avg_spacing': avg_spacing,
-                    'risk_label': risk_label
+                    'risk_label': risk_label,
+                    'bone_crest_point': bone_crest_data['point']
                 })
 
-                print(f"  牙齿 {i+1}-{i+2}: 最小间距 {min_spacing:.2f}mm ({risk_label})")
+                print(f"    ✓ 最小间距: {min_spacing:.2f}mm ({risk_label})")
+            else:
+                print(f"    ⚠ 无法测量间距")
 
         # 可视化结果
         print("正在生成可视化...")
-        self.visualize_results(original_image, teeth_data, spacing_results, image_path, output_dir, boundary_data)
+        self.visualize_results_v2(original_image, teeth_data, spacing_results, image_path, output_dir)
 
         results = {
             'image_path': image_path,
             'teeth_data': teeth_data,
-            'spacing_results': spacing_results,
-            'boundary_data': boundary_data
+            'spacing_results': spacing_results
         }
 
         return results
+
+    def visualize_results_v2(self, original_image, teeth_data, spacing_results, image_path, output_dir):
+        """
+        可视化分析结果（新版本 - 基于形态学方法）
+
+        参数:
+            original_image: 原始图像
+            teeth_data: 牙齿数据列表
+            spacing_results: 间距测量结果
+            image_path: 原始图像路径
+            output_dir: 输出目录
+        """
+        # 创建输出目录
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 创建图形
+        fig = plt.figure(figsize=(20, 12))
+
+        # 1. 原始图像 + 牙齿轮廓 + 长轴
+        ax1 = plt.subplot(2, 2, 1)
+        ax1.imshow(cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB))
+        ax1.set_title('牙齿检测与长轴标注', fontsize=14, fontweight='bold')
+        ax1.axis('off')
+
+        # 绘制每颗牙齿的轮廓和长轴
+        for i, tooth in enumerate(teeth_data):
+            # 绘制轮廓
+            contour = tooth['contour']
+            color = tuple(np.random.randint(100, 255, 3).tolist())
+            cv2.drawContours(original_image, [contour], -1, color, 2)
+
+            # 标注牙齿编号
+            centroid = tuple(map(int, tooth['centroid']))
+            ax1.text(centroid[0], centroid[1] - 20, f'T{i+1}',
+                    fontsize=10, color='yellow', fontweight='bold',
+                    bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+
+            # 绘制长轴
+            if 'long_axis' in tooth:
+                axis_data = tooth['long_axis']
+                start = axis_data['axis_start']
+                end = axis_data['axis_end']
+                ax1.plot([start[0], end[0]], [start[1], end[1]],
+                        'b-', linewidth=3, alpha=0.8)
+                # 箭头指向牙根
+                ax1.annotate('', xy=end, xytext=start,
+                           arrowprops=dict(arrowstyle='->', color='red', lw=2))
+
+        # 绘制骨嵴点
+        for result in spacing_results:
+            if 'bone_crest_point' in result:
+                point = result['bone_crest_point']
+                ax1.scatter(point[0], point[1], c='red', s=100, marker='o',
+                          edgecolors='white', linewidths=2, zorder=5)
+
+        # 2. 牙齿间距测量示意图
+        ax2 = plt.subplot(2, 2, 2)
+        ax2.imshow(cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB))
+        ax2.set_title('牙根间距测量（沿长轴）', fontsize=14, fontweight='bold')
+        ax2.axis('off')
+
+        for result in spacing_results:
+            profile = result['profile']
+
+            # 绘制测量线（颜色编码）
+            for i, (edge1, edge2) in enumerate(profile['measurement_lines']):
+                color_hex = profile['colors'][i]
+                color_rgb = tuple(int(color_hex[j:j+2], 16) for j in (1, 3, 5))
+                color_rgb = tuple(c/255.0 for c in color_rgb)
+
+                ax2.plot([edge1[0], edge2[0]], [edge1[1], edge2[1]],
+                        color=color_rgb, linewidth=2, alpha=0.7)
+
+        # 3. 牙齿间距热力图
+        ax3 = plt.subplot(2, 2, 3)
+        spacing_vis = original_image.copy()
+
+        for result in spacing_results:
+            profile = result['profile']
+
+            # 绘制间距区域的颜色编码
+            for i in range(len(profile['depths']) - 1):
+                edge1 = profile['tooth1_edges'][i]
+                edge2 = profile['tooth2_edges'][i]
+                edge1_next = profile['tooth1_edges'][i + 1]
+                edge2_next = profile['tooth2_edges'][i + 1]
+
+                # 创建四边形填充
+                pts = np.array([edge1, edge2, edge2_next, edge1_next], dtype=np.int32)
+
+                # 获取颜色
+                color_hex = profile['colors'][i]
+                color_rgb = tuple(int(color_hex[j:j+2], 16) for j in (1, 3, 5))
+                color_bgr = (color_rgb[2], color_rgb[1], color_rgb[0])
+
+                # 绘制半透明填充
+                overlay = spacing_vis.copy()
+                cv2.fillPoly(overlay, [pts], color_bgr)
+                cv2.addWeighted(overlay, 0.5, spacing_vis, 0.5, 0, spacing_vis)
+
+        ax3.imshow(cv2.cvtColor(spacing_vis, cv2.COLOR_BGR2RGB))
+        ax3.set_title('牙齿间距颜色编码', fontsize=14, fontweight='bold')
+        ax3.axis('off')
+
+        # 添加图例
+        danger_patch = mpatches.Patch(color='#FF4444', label=f'危险 (< {self.DANGER_THRESHOLD}mm)', alpha=0.7)
+        warning_patch = mpatches.Patch(color='#FFDD44', label=f'相对安全 ({self.DANGER_THRESHOLD}-{self.WARNING_THRESHOLD}mm)', alpha=0.7)
+        safe_patch = mpatches.Patch(color='#44FF44', label=f'安全 (≥ {self.WARNING_THRESHOLD}mm)', alpha=0.7)
+        ax3.legend(handles=[danger_patch, warning_patch, safe_patch], loc='upper right', fontsize=10)
+
+        # 4. 间距-深度曲线图
+        ax4 = plt.subplot(2, 2, 4)
+
+        for result in spacing_results:
+            i, j = result['tooth_pair']
+            profile = result['profile']
+
+            if len(profile['depths']) > 0:
+                # 绘制曲线
+                ax4.plot(profile['spacings'], profile['depths'],
+                        marker='o', markersize=4, linewidth=2,
+                        label=f'牙齿 {i+1}-{j+1}', alpha=0.7)
+
+        ax4.axvline(x=self.DANGER_THRESHOLD, color='red', linestyle='--',
+                   linewidth=2, alpha=0.5, label=f'危险阈值 ({self.DANGER_THRESHOLD}mm)')
+        ax4.axvline(x=self.WARNING_THRESHOLD, color='orange', linestyle='--',
+                   linewidth=2, alpha=0.5, label=f'警告阈值 ({self.WARNING_THRESHOLD}mm)')
+
+        ax4.set_xlabel('间距 (mm)', fontsize=12)
+        ax4.set_ylabel('从骨嵴向下深度 (mm)', fontsize=12)
+        ax4.set_title('间距随深度变化曲线', fontsize=14, fontweight='bold')
+        ax4.grid(True, alpha=0.3)
+        ax4.legend(loc='best', fontsize=9)
+        ax4.invert_yaxis()
+
+        # 保存图像
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        output_path = os.path.join(output_dir, f'{base_name}_analysis.png')
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"✓ 可视化结果已保存: {output_path}")
 
     def visualize_results(self, original_image, teeth_data, spacing_results, image_path, output_dir, boundary_data=None):
         """
@@ -1578,14 +2055,14 @@ class ToothCEJAnalyzer:
 def main():
     """主函数"""
     print("=" * 60)
-    print("牙齿CEJ线检测与根部距离测量系统")
+    print("牙齿根部距离测量系统（形态学方法）")
     print("=" * 60)
     print()
     print("功能说明：")
-    print("1. 自动检测全景X光片中的每颗牙齿")
-    print("2. 识别每颗牙齿的CEJ线（釉牙骨质界）")
-    print("3. 沿CEJ线法线方向测量牙根深度")
-    print("4. 测量相邻牙齿在不同深度的间距")
+    print("1. 自动检测全景X光片中的每颗牙齿（U-Net）")
+    print("2. 计算每颗牙齿的长轴和方向")
+    print("3. 在牙齿间隙检测骨嵴边界（形态学方法）")
+    print("4. 沿牙齿长轴测量根部间距")
     print("5. 根据间距进行风险等级颜色编码")
     print()
     print("-" * 60)
