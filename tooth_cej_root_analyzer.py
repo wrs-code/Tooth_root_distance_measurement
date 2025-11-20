@@ -292,14 +292,13 @@ class ToothCEJAnalyzer:
 
         return upper_teeth, lower_teeth
 
-    def create_convex_hull_roi(self, teeth_group, image_shape, expand_pixels=50):
+    def create_convex_hull_roi(self, teeth_group, image_shape):
         """
-        为一组牙齿创建基于凸包的ROI区域（只有凸面）
+        为一组牙齿创建基于凸包的ROI区域（只有凸面，不扩展）
 
         参数:
             teeth_group: 牙齿组（上颌或下颌）
             image_shape: 图像形状 (height, width)
-            expand_pixels: ROI扩展像素数
 
         返回:
             convex_hull: 凸包轮廓点 (N, 1, 2)
@@ -330,64 +329,35 @@ class ToothCEJAnalyzer:
         # 转换为numpy数组
         all_points = np.array(all_points, dtype=np.int32)
 
-        # 计算凸包
-        hull = cv2.convexHull(all_points)
-
-        # 扩展凸包（向外扩展）
-        # 计算凸包的中心
-        M = cv2.moments(hull)
-        if M['m00'] != 0:
-            cx = int(M['m10'] / M['m00'])
-            cy = int(M['m01'] / M['m00'])
-        else:
-            cx = width // 2
-            cy = height // 2
-
-        # 将凸包点向外扩展
-        expanded_hull = []
-        for point in hull:
-            px, py = point[0]
-            # 计算从中心到点的向量
-            dx = px - cx
-            dy = py - cy
-            # 计算向量长度
-            length = np.sqrt(dx*dx + dy*dy)
-            if length > 0:
-                # 归一化并扩展
-                dx = dx / length * expand_pixels
-                dy = dy / length * expand_pixels
-                # 新的点
-                new_px = int(px + dx)
-                new_py = int(py + dy)
-                # 确保在图像范围内
-                new_px = max(0, min(width-1, new_px))
-                new_py = max(0, min(height-1, new_py))
-                expanded_hull.append([[new_px, new_py]])
-            else:
-                expanded_hull.append([[px, py]])
-
-        expanded_hull = np.array(expanded_hull, dtype=np.int32)
+        # 计算凸包（不扩展，直接使用原始凸包）
+        convex_hull = cv2.convexHull(all_points)
 
         # 创建ROI掩码
         roi_mask = np.zeros((height, width), dtype=np.uint8)
-        cv2.fillPoly(roi_mask, [expanded_hull], 255)
+        cv2.fillPoly(roi_mask, [convex_hull], 255)
 
-        return expanded_hull, roi_mask, teeth_mask
+        return convex_hull, roi_mask, teeth_mask
 
-    def create_alveolar_bone_image(self, image, roi_mask, teeth_mask):
+    def create_alveolar_bone_image(self, image, roi_mask, teeth_mask, buffer_pixels=5):
         """
-        创建只包含牙槽骨区域的图像（删除牙齿区域）
+        创建只包含牙槽骨区域的图像（删除牙齿区域及其边缘缓冲区）
 
         参数:
             image: 原始图像
             roi_mask: ROI区域掩码
             teeth_mask: 牙齿区域掩码
+            buffer_pixels: 牙齿边缘缓冲区像素数（默认5像素）
 
         返回:
             alveolar_image: 只包含牙槽骨的图像
         """
-        # 创建牙槽骨掩码：在ROI内但不在牙齿区域
-        alveolar_mask = cv2.bitwise_and(roi_mask, cv2.bitwise_not(teeth_mask))
+        # 对牙齿mask进行膨胀操作，创建缓冲区
+        # 这样可以排除牙齿轮廓周围几个像素的区域，避免边缘检测到牙齿边缘
+        kernel = np.ones((buffer_pixels*2+1, buffer_pixels*2+1), np.uint8)
+        dilated_teeth_mask = cv2.dilate(teeth_mask, kernel, iterations=1)
+
+        # 创建牙槽骨掩码：在ROI内但不在扩展后的牙齿区域
+        alveolar_mask = cv2.bitwise_and(roi_mask, cv2.bitwise_not(dilated_teeth_mask))
 
         # 应用掩码到图像
         alveolar_image = cv2.bitwise_and(image, image, mask=alveolar_mask)
@@ -752,13 +722,13 @@ class ToothCEJAnalyzer:
         if len(upper_teeth) > 0:
             print("  处理上颌CEJ线...")
 
-            # 2.1 创建凸包ROI
+            # 2.1 创建凸包ROI（不扩展）
             convex_hull, roi_mask, teeth_mask = self.create_convex_hull_roi(
-                upper_teeth, image_shape, expand_pixels=50)
+                upper_teeth, image_shape)
 
             if convex_hull is not None:
-                # 2.2 创建只包含牙槽骨的图像（删除牙齿）
-                alveolar_image = self.create_alveolar_bone_image(image, roi_mask, teeth_mask)
+                # 2.2 创建只包含牙槽骨的图像（删除牙齿及其边缘缓冲区）
+                alveolar_image = self.create_alveolar_bone_image(image, roi_mask, teeth_mask, buffer_pixels=5)
 
                 # 2.3 提取均匀分布的边缘点
                 edge_points, is_valid = self.extract_uniform_edge_points(
@@ -784,13 +754,13 @@ class ToothCEJAnalyzer:
         if len(lower_teeth) > 0:
             print("  处理下颌CEJ线...")
 
-            # 3.1 创建凸包ROI
+            # 3.1 创建凸包ROI（不扩展）
             convex_hull, roi_mask, teeth_mask = self.create_convex_hull_roi(
-                lower_teeth, image_shape, expand_pixels=50)
+                lower_teeth, image_shape)
 
             if convex_hull is not None:
-                # 3.2 创建只包含牙槽骨的图像（删除牙齿）
-                alveolar_image = self.create_alveolar_bone_image(image, roi_mask, teeth_mask)
+                # 3.2 创建只包含牙槽骨的图像（删除牙齿及其边缘缓冲区）
+                alveolar_image = self.create_alveolar_bone_image(image, roi_mask, teeth_mask, buffer_pixels=5)
 
                 # 3.3 提取均匀分布的边缘点
                 edge_points, is_valid = self.extract_uniform_edge_points(
