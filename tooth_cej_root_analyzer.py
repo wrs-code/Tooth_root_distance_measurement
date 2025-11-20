@@ -292,9 +292,9 @@ class ToothCEJAnalyzer:
 
         return upper_teeth, lower_teeth
 
-    def create_jaw_roi(self, teeth_group, image_shape, expand_pixels=50):
+    def create_convex_hull_roi(self, teeth_group, image_shape, expand_pixels=50):
         """
-        为一组牙齿创建ROI区域
+        为一组牙齿创建基于凸包的ROI区域（只有凸面）
 
         参数:
             teeth_group: 牙齿组（上颌或下颌）
@@ -302,42 +302,250 @@ class ToothCEJAnalyzer:
             expand_pixels: ROI扩展像素数
 
         返回:
-            roi_bbox: ROI边界框 (x, y, w, h)
+            convex_hull: 凸包轮廓点 (N, 1, 2)
+            roi_mask: ROI区域的二值掩码
             teeth_mask: 牙齿区域的掩码
         """
         if len(teeth_group) == 0:
-            return None, None
+            return None, None, None
 
         height, width = image_shape[:2]
 
-        # 合并所有牙齿的边界框
-        min_x = width
-        min_y = height
-        max_x = 0
-        max_y = 0
-
-        # 创建合并的牙齿掩码
+        # 收集所有牙齿的轮廓点
+        all_points = []
         teeth_mask = np.zeros((height, width), dtype=np.uint8)
 
         for tooth in teeth_group:
-            x, y, w, h = tooth['bbox']
-            min_x = min(min_x, x)
-            min_y = min(min_y, y)
-            max_x = max(max_x, x + w)
-            max_y = max(max_y, y + h)
+            # 收集该牙齿的所有轮廓点
+            contour = tooth['contour']
+            points = contour.reshape(-1, 2)  # (N, 2)
+            all_points.extend(points)
 
-            # 将牙齿掩码添加到总掩码
+            # 合并牙齿掩码
             teeth_mask = cv2.bitwise_or(teeth_mask, tooth['mask'])
 
-        # 扩展ROI区域
-        min_x = max(0, min_x - expand_pixels)
-        min_y = max(0, min_y - expand_pixels)
-        max_x = min(width, max_x + expand_pixels)
-        max_y = min(height, max_y + expand_pixels)
+        if len(all_points) == 0:
+            return None, None, None
 
-        roi_bbox = (min_x, min_y, max_x - min_x, max_y - min_y)
+        # 转换为numpy数组
+        all_points = np.array(all_points, dtype=np.int32)
 
-        return roi_bbox, teeth_mask
+        # 计算凸包
+        hull = cv2.convexHull(all_points)
+
+        # 扩展凸包（向外扩展）
+        # 计算凸包的中心
+        M = cv2.moments(hull)
+        if M['m00'] != 0:
+            cx = int(M['m10'] / M['m00'])
+            cy = int(M['m01'] / M['m00'])
+        else:
+            cx = width // 2
+            cy = height // 2
+
+        # 将凸包点向外扩展
+        expanded_hull = []
+        for point in hull:
+            px, py = point[0]
+            # 计算从中心到点的向量
+            dx = px - cx
+            dy = py - cy
+            # 计算向量长度
+            length = np.sqrt(dx*dx + dy*dy)
+            if length > 0:
+                # 归一化并扩展
+                dx = dx / length * expand_pixels
+                dy = dy / length * expand_pixels
+                # 新的点
+                new_px = int(px + dx)
+                new_py = int(py + dy)
+                # 确保在图像范围内
+                new_px = max(0, min(width-1, new_px))
+                new_py = max(0, min(height-1, new_py))
+                expanded_hull.append([[new_px, new_py]])
+            else:
+                expanded_hull.append([[px, py]])
+
+        expanded_hull = np.array(expanded_hull, dtype=np.int32)
+
+        # 创建ROI掩码
+        roi_mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillPoly(roi_mask, [expanded_hull], 255)
+
+        return expanded_hull, roi_mask, teeth_mask
+
+    def create_alveolar_bone_image(self, image, roi_mask, teeth_mask):
+        """
+        创建只包含牙槽骨区域的图像（删除牙齿区域）
+
+        参数:
+            image: 原始图像
+            roi_mask: ROI区域掩码
+            teeth_mask: 牙齿区域掩码
+
+        返回:
+            alveolar_image: 只包含牙槽骨的图像
+        """
+        # 创建牙槽骨掩码：在ROI内但不在牙齿区域
+        alveolar_mask = cv2.bitwise_and(roi_mask, cv2.bitwise_not(teeth_mask))
+
+        # 应用掩码到图像
+        alveolar_image = cv2.bitwise_and(image, image, mask=alveolar_mask)
+
+        return alveolar_image
+
+    def check_point_distribution(self, points, min_points=13):
+        """
+        检查点的分布是否均匀
+
+        参数:
+            points: 点列表 [(x, y), ...]
+            min_points: 最小点数
+
+        返回:
+            is_valid: 是否满足要求（点数>=min_points且分布均匀）
+            uniformity_score: 均匀性评分（0-1，越高越均匀）
+        """
+        if len(points) < min_points:
+            return False, 0.0
+
+        # 按X坐标排序
+        sorted_points = sorted(points, key=lambda p: p[0])
+
+        # 计算相邻点之间的X方向间距
+        x_gaps = []
+        for i in range(len(sorted_points) - 1):
+            gap = sorted_points[i+1][0] - sorted_points[i][0]
+            x_gaps.append(gap)
+
+        if len(x_gaps) == 0:
+            return False, 0.0
+
+        # 计算间距的标准差和平均值
+        mean_gap = np.mean(x_gaps)
+        std_gap = np.std(x_gaps)
+
+        # 计算变异系数（CV = std/mean）
+        # CV越小说明分布越均匀
+        if mean_gap > 0:
+            cv = std_gap / mean_gap
+            # 将CV转换为均匀性评分（0-1）
+            # CV=0时最均匀，CV>1时很不均匀
+            uniformity_score = max(0, 1 - cv)
+        else:
+            uniformity_score = 0.0
+
+        # 判断是否均匀：CV < 0.5 认为是均匀的
+        is_uniform = cv < 0.5 if mean_gap > 0 else False
+
+        return is_uniform and len(points) >= min_points, uniformity_score
+
+    def extract_uniform_edge_points(self, alveolar_image, teeth_group, convex_hull,
+                                    min_points=13, canny_low=50, canny_high=150):
+        """
+        从牙槽骨图像中提取均匀分布的CEJ边缘点
+
+        参数:
+            alveolar_image: 牙槽骨图像（已删除牙齿）
+            teeth_group: 牙齿组
+            convex_hull: 凸包轮廓
+            min_points: 最小边缘点数
+            canny_low: Canny低阈值
+            canny_high: Canny高阈值
+
+        返回:
+            edge_points: 边缘点列表 [(x, y), ...]
+            is_valid: 是否满足要求
+        """
+        # 1. 使用Canny边缘检测
+        edges = cv2.Canny(alveolar_image, canny_low, canny_high)
+
+        # 2. 形态学操作连接边缘
+        kernel = np.ones((3, 3), np.uint8)
+        edges = cv2.dilate(edges, kernel, iterations=1)
+        edges = cv2.erode(edges, kernel, iterations=1)
+
+        # 3. 确定CEJ搜索区域（在牙齿颈部附近）
+        # 计算所有牙齿的Y坐标范围
+        if len(teeth_group) == 0:
+            return [], False
+
+        all_y_coords = []
+        for tooth in teeth_group:
+            x, y, w, h = tooth['bbox']
+            # CEJ通常在牙齿的25%-60%高度范围内
+            cej_y_start = y + int(h * 0.25)
+            cej_y_end = y + int(h * 0.6)
+            all_y_coords.extend([cej_y_start, cej_y_end])
+
+        if len(all_y_coords) == 0:
+            return [], False
+
+        # 搜索区域的Y范围
+        search_y_min = min(all_y_coords)
+        search_y_max = max(all_y_coords)
+
+        # 4. 提取边缘点
+        edge_coords = np.column_stack(np.where(edges > 0))  # (y, x)
+
+        # 5. 筛选在搜索区域内的点
+        cej_candidate_points = []
+        for y, x in edge_coords:
+            if search_y_min <= y <= search_y_max:
+                cej_candidate_points.append((x, y))
+
+        if len(cej_candidate_points) < min_points:
+            print(f"    警告: 边缘点数不足 ({len(cej_candidate_points)} < {min_points})")
+            return cej_candidate_points, False
+
+        # 6. 检查点的分布均匀性
+        is_valid, uniformity_score = self.check_point_distribution(cej_candidate_points, min_points)
+
+        print(f"    提取边缘点: {len(cej_candidate_points)} 个, 均匀性评分: {uniformity_score:.2f}")
+
+        # 7. 如果分布不均匀，尝试采样使其更均匀
+        if not is_valid and len(cej_candidate_points) >= min_points:
+            print("    分布不够均匀，尝试重新采样...")
+            # 按X坐标排序
+            sorted_points = sorted(cej_candidate_points, key=lambda p: p[0])
+
+            # 计算X范围
+            x_min = sorted_points[0][0]
+            x_max = sorted_points[-1][0]
+            x_range = x_max - x_min
+
+            if x_range > 0:
+                # 将X范围分成bins，每个bin取一个代表点
+                num_bins = max(min_points, len(cej_candidate_points) // 3)
+                bin_width = x_range / num_bins
+
+                resampled_points = []
+                for i in range(num_bins):
+                    bin_x_min = x_min + i * bin_width
+                    bin_x_max = x_min + (i + 1) * bin_width
+
+                    # 找到该bin内的所有点
+                    bin_points = [p for p in sorted_points if bin_x_min <= p[0] < bin_x_max]
+
+                    if bin_points:
+                        # 取该bin的中位数点
+                        mid_idx = len(bin_points) // 2
+                        resampled_points.append(bin_points[mid_idx])
+
+                # 再次检查分布
+                is_valid_resampled, uniformity_score_resampled = self.check_point_distribution(
+                    resampled_points, min_points)
+
+                if is_valid_resampled:
+                    print(f"    重新采样成功: {len(resampled_points)} 个点, 均匀性: {uniformity_score_resampled:.2f}")
+                    return resampled_points, True
+                else:
+                    # 即使不够均匀，如果点数足够，也可以使用
+                    if len(resampled_points) >= min_points:
+                        print(f"    使用重采样点 (均匀性欠佳)")
+                        return resampled_points, True
+
+        return cej_candidate_points, is_valid
 
     def detect_cej_points_in_roi(self, image, teeth_group, roi_bbox, teeth_mask):
         """
@@ -512,7 +720,14 @@ class ToothCEJAnalyzer:
 
     def detect_global_cej_lines(self, teeth_data, image, image_shape):
         """
-        检测全局的CEJ线（上颌和下颌各一条）
+        检测全局的CEJ线（上颌和下颌各一条）- 新算法
+
+        新算法基于：
+        1. 凸包ROI提取（只有凸面）
+        2. 删除牙齿区域，只保留牙槽骨
+        3. Canny边缘检测提取牙槽骨边缘
+        4. 确保边缘点数>=13且分布均匀
+        5. 多项式曲线拟合
 
         参数:
             teeth_data: 所有牙齿数据
@@ -523,7 +738,7 @@ class ToothCEJAnalyzer:
             upper_cej: 上颌CEJ线数据 {'curve': [...], 'coeffs': [...]}
             lower_cej: 下颌CEJ线数据
         """
-        print("正在检测全局CEJ线...")
+        print("正在检测全局CEJ线（使用凸包ROI和牙槽骨边缘检测）...")
 
         height, width = image_shape[:2]
 
@@ -536,36 +751,66 @@ class ToothCEJAnalyzer:
         # 2. 处理上颌
         if len(upper_teeth) > 0:
             print("  处理上颌CEJ线...")
-            roi_bbox, teeth_mask = self.create_jaw_roi(upper_teeth, image_shape)
-            cej_points = self.detect_cej_points_in_roi(image, upper_teeth, roi_bbox, teeth_mask)
 
-            if len(cej_points) >= 3:
-                fitted_curve, poly_coeffs = self.fit_cej_curve(cej_points, width)
-                if fitted_curve is not None:
-                    upper_cej = {
-                        'curve': fitted_curve,
-                        'coeffs': poly_coeffs,
-                        'points': cej_points,
-                        'teeth': upper_teeth
-                    }
-                    print(f"    ✓ 上颌CEJ线已检测，包含 {len(fitted_curve)} 个拟合点")
+            # 2.1 创建凸包ROI
+            convex_hull, roi_mask, teeth_mask = self.create_convex_hull_roi(
+                upper_teeth, image_shape, expand_pixels=50)
+
+            if convex_hull is not None:
+                # 2.2 创建只包含牙槽骨的图像（删除牙齿）
+                alveolar_image = self.create_alveolar_bone_image(image, roi_mask, teeth_mask)
+
+                # 2.3 提取均匀分布的边缘点
+                edge_points, is_valid = self.extract_uniform_edge_points(
+                    alveolar_image, upper_teeth, convex_hull, min_points=13)
+
+                if is_valid and len(edge_points) >= 3:
+                    # 2.4 拟合CEJ曲线
+                    fitted_curve, poly_coeffs = self.fit_cej_curve(edge_points, width)
+
+                    if fitted_curve is not None:
+                        upper_cej = {
+                            'curve': fitted_curve,
+                            'coeffs': poly_coeffs,
+                            'points': edge_points,
+                            'teeth': upper_teeth,
+                            'convex_hull': convex_hull
+                        }
+                        print(f"    ✓ 上颌CEJ线已检测，包含 {len(edge_points)} 个边缘点，{len(fitted_curve)} 个拟合点")
+                else:
+                    print(f"    ✗ 上颌CEJ线检测失败：边缘点不足或分布不均")
 
         # 3. 处理下颌
         if len(lower_teeth) > 0:
             print("  处理下颌CEJ线...")
-            roi_bbox, teeth_mask = self.create_jaw_roi(lower_teeth, image_shape)
-            cej_points = self.detect_cej_points_in_roi(image, lower_teeth, roi_bbox, teeth_mask)
 
-            if len(cej_points) >= 3:
-                fitted_curve, poly_coeffs = self.fit_cej_curve(cej_points, width)
-                if fitted_curve is not None:
-                    lower_cej = {
-                        'curve': fitted_curve,
-                        'coeffs': poly_coeffs,
-                        'points': cej_points,
-                        'teeth': lower_teeth
-                    }
-                    print(f"    ✓ 下颌CEJ线已检测，包含 {len(fitted_curve)} 个拟合点")
+            # 3.1 创建凸包ROI
+            convex_hull, roi_mask, teeth_mask = self.create_convex_hull_roi(
+                lower_teeth, image_shape, expand_pixels=50)
+
+            if convex_hull is not None:
+                # 3.2 创建只包含牙槽骨的图像（删除牙齿）
+                alveolar_image = self.create_alveolar_bone_image(image, roi_mask, teeth_mask)
+
+                # 3.3 提取均匀分布的边缘点
+                edge_points, is_valid = self.extract_uniform_edge_points(
+                    alveolar_image, lower_teeth, convex_hull, min_points=13)
+
+                if is_valid and len(edge_points) >= 3:
+                    # 3.4 拟合CEJ曲线
+                    fitted_curve, poly_coeffs = self.fit_cej_curve(edge_points, width)
+
+                    if fitted_curve is not None:
+                        lower_cej = {
+                            'curve': fitted_curve,
+                            'coeffs': poly_coeffs,
+                            'points': edge_points,
+                            'teeth': lower_teeth,
+                            'convex_hull': convex_hull
+                        }
+                        print(f"    ✓ 下颌CEJ线已检测，包含 {len(edge_points)} 个边缘点，{len(fitted_curve)} 个拟合点")
+                else:
+                    print(f"    ✗ 下颌CEJ线检测失败：边缘点不足或分布不均")
 
         return upper_cej, lower_cej
 
