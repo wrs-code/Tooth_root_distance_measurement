@@ -105,37 +105,42 @@ class UNetTeethSegmentation:
 
         return binary_mask
 
-    def refine_mask(self, mask, open_iteration=2, erode_iteration=1):
+    def refine_mask(self, mask, open_iteration=2, erode_iteration=3):
         """
         使用形态学操作细化掩码
         与开源仓库CCA_Analysis.py完全一致的后处理流程
+        参考：https://github.com/SerdarHelli/Segmentation-of-Teeth-in-Panoramic-X-ray-Image-Using-U-Net/blob/master/CCA_Analysis.py
 
         参数:
             mask: 二值掩码
-            open_iteration: 开运算迭代次数（默认2）
-            erode_iteration: 腐蚀迭代次数（默认1）
+            open_iteration: 开运算迭代次数（默认2，与开源一致）
+            erode_iteration: 腐蚀迭代次数（默认3，与开源一致）
 
         返回:
             refined: 细化后的掩码
         """
-        # 确保mask是uint8类型
-        if mask.dtype != np.uint8:
-            mask = mask.astype(np.uint8)
-
-        # 1. 形态学开运算去除小噪声（使用5x5核）
-        kernel = np.ones((5, 5), np.uint8)
-        opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=open_iteration)
-
-        # 2. 应用锐化滤波器增强边缘
+        # 与开源仓库完全相同的参数
+        # kernel1 = np.ones((5,5), dtype=np.float32)
+        kernel1 = np.ones((5, 5), dtype=np.float32)
         kernel_sharpening = np.array([[-1, -1, -1],
                                        [-1,  9, -1],
                                        [-1, -1, -1]])
-        sharpened = cv2.filter2D(opened, -1, kernel_sharpening)
+
+        image = mask
+
+        # 1. 形态学开运算去除小噪声
+        # image=cv2.morphologyEx(image, cv2.MORPH_OPEN, kernel1,iterations=open_iteration )
+        image = cv2.morphologyEx(image, cv2.MORPH_OPEN, kernel1, iterations=open_iteration)
+
+        # 2. 应用锐化滤波器增强边缘
+        # image = cv2.filter2D(image, -1, kernel_sharpening)
+        image = cv2.filter2D(image, -1, kernel_sharpening)
 
         # 3. 腐蚀以分离相邻牙齿
-        eroded = cv2.erode(sharpened, kernel, iterations=erode_iteration)
+        # image=cv2.erode(image,kernel1,iterations =erode_iteration)
+        image = cv2.erode(image, kernel1, iterations=erode_iteration)
 
-        return eroded
+        return image
 
     def segment_teeth(self, image, threshold=0.5):
         """
@@ -236,62 +241,78 @@ class UNetTeethSegmentation:
         """
         从分割掩码中提取单个牙齿
         使用连通组件分析（CCA）
-        与开源仓库CCA_Analysis.py一致：面积阈值 > 2000
+        与开源仓库CCA_Analysis.py完全一致
+        参考：https://github.com/SerdarHelli/Segmentation-of-Teeth-in-Panoramic-X-ray-Image-Using-U-Net/blob/master/CCA_Analysis.py
 
         参数:
             mask: 牙齿分割掩码
-            min_area: 最小牙齿面积（默认2000，与开源仓库一致）
+            min_area: 最小牙齿面积（默认2000，与开源仓库一致：c_area>2000）
 
         返回:
             teeth_data: 包含每颗牙齿信息的列表
         """
-        # 连通组件分析（connectivity=8，与开源仓库一致）
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            mask, connectivity=8
-        )
+        # 与开源仓库完全一致的连通组件分析
+        # labels=cv2.connectedComponents(thresh,connectivity=8)[1]
+        labels = cv2.connectedComponents(mask, connectivity=8)[1]
+        a = np.unique(labels)
 
         teeth_data = []
 
-        # 遍历每个连通组件（跳过背景label=0）
-        for label in range(1, num_labels):
-            # 获取组件统计信息
-            area = stats[label, cv2.CC_STAT_AREA]
-
-            # 面积过滤：与开源仓库一致（c_area > 2000）
-            if area <= min_area:
+        # 遍历每个label（与开源仓库完全一致的循环）
+        # for label in a:
+        for label in a:
+            if label == 0:
                 continue
 
-            # 创建单个牙齿的掩码
-            tooth_mask = np.zeros(mask.shape, dtype=np.uint8)
+            # Create a mask
+            # mask = np.zeros(thresh.shape, dtype="uint8")
+            # mask[labels == label] = 255
+            tooth_mask = np.zeros(mask.shape, dtype="uint8")
             tooth_mask[labels == label] = 255
 
-            # 查找轮廓
-            contours, _ = cv2.findContours(tooth_mask, cv2.RETR_EXTERNAL,
-                                          cv2.CHAIN_APPROX_SIMPLE)
-
-            if len(contours) == 0:
+            # Find contours and determine contour area
+            # cnts,hieararch = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # cnts = cnts[0]
+            cnts, hieararch = cv2.findContours(tooth_mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if len(cnts) == 0:
                 continue
+            cnts = cnts[0]
 
-            contour = contours[0]
+            # c_area = cv2.contourArea(cnts)
+            c_area = cv2.contourArea(cnts)
 
-            # 计算边界框
-            x, y, w, h = cv2.boundingRect(contour)
+            # threshhold for tooth count
+            # if c_area>2000:
+            if c_area > min_area:
+                # 计算边界框
+                x, y, w, h = cv2.boundingRect(cnts)
 
-            # 计算最小外接矩形
-            rect = cv2.minAreaRect(contour)
-            box = cv2.boxPoints(rect)
-            box = np.array(box, dtype=np.int32)
+                # 计算最小外接矩形（与开源仓库一致）
+                # rect = cv2.minAreaRect(cnts)
+                # box = cv2.boxPoints(rect)
+                # box = np.array(box, dtype="int")
+                rect = cv2.minAreaRect(cnts)
+                box = cv2.boxPoints(rect)
+                box = np.array(box, dtype="int")
 
-            teeth_data.append({
-                'label': label,
-                'contour': contour,
-                'mask': tooth_mask,
-                'bbox': (x, y, w, h),
-                'rect': rect,
-                'box': box,
-                'centroid': centroids[label],
-                'area': area
-            })
+                # 计算质心（近似）
+                M = cv2.moments(cnts)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                else:
+                    cx, cy = x + w // 2, y + h // 2
+
+                teeth_data.append({
+                    'label': label,
+                    'contour': cnts,
+                    'mask': tooth_mask,
+                    'bbox': (x, y, w, h),
+                    'rect': rect,
+                    'box': box,
+                    'centroid': (cx, cy),
+                    'area': c_area
+                })
 
         # 按X坐标排序（从左到右）
         teeth_data.sort(key=lambda t: t['centroid'][0])
