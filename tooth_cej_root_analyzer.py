@@ -23,7 +23,7 @@ from pathlib import Path
 from unet_segmentation import UNetTeethSegmentation
 
 # 配置matplotlib支持中文显示
-plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei', 'WenQuanYi Micro Hei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
 
@@ -246,17 +246,16 @@ class ToothCEJAnalyzer:
     def detect_cej_line(self, tooth_data, original_image):
         """
         检测单颗牙齿的CEJ线（釉牙骨质界）
-
-        CEJ线位于牙冠和牙根的交界处，通常是牙齿轮廓宽度变化最明显的位置
+        CEJ线是沿着牙齿轮廓的曲线，位于牙冠和牙根的交界处
 
         参数:
             tooth_data: 牙齿数据字典
             original_image: 原始图像
 
         返回:
-            cej_point: CEJ线的中心点坐标
-            cej_y: CEJ线的Y坐标
-            cej_normal: CEJ线的法线方向向量
+            cej_curve: CEJ线的曲线点列表 [(x1, y1), (x2, y2), ...]
+            cej_center: CEJ线的中心点坐标
+            cej_normal: CEJ线中心处的法线方向向量
         """
         contour = tooth_data['contour']
         x, y, w, h = tooth_data['bbox']
@@ -266,6 +265,8 @@ class ToothCEJAnalyzer:
 
         width_profile = []
         y_positions = []
+        left_edges = []
+        right_edges = []
 
         # 从上到下扫描牙齿
         for scan_y in range(y, y + h, 2):
@@ -278,16 +279,20 @@ class ToothCEJAnalyzer:
                     intersections.append(px)
 
             if len(intersections) >= 2:
+                intersections.sort()
                 width = max(intersections) - min(intersections)
                 width_profile.append(width)
                 y_positions.append(scan_y)
+                left_edges.append(min(intersections))
+                right_edges.append(max(intersections))
 
         if len(width_profile) < 3:
             # 如果无法检测，使用牙齿高度的40%作为估计
             cej_y = y + int(h * 0.4)
-            cej_point = (int(x + w / 2), cej_y)
+            cej_center = (int(x + w / 2), cej_y)
+            cej_curve = [(x, cej_y), (x + w, cej_y)]
             cej_normal = np.array([0, 1])  # 默认垂直向下
-            return cej_point, cej_y, cej_normal
+            return cej_curve, cej_center, cej_normal
 
         # 计算宽度变化率
         width_profile = np.array(width_profile)
@@ -318,34 +323,49 @@ class ToothCEJAnalyzer:
         # 获取CEJ线的Y坐标
         cej_y = y_positions[min(cej_idx, len(y_positions) - 1)]
 
-        # 获取CEJ线处的左右边界点
-        cej_intersections = []
+        # 提取CEJ线附近的轮廓点（±5个像素范围）
+        cej_curve_points = []
         for point in contour:
             px, py = point[0]
-            if abs(py - cej_y) <= 3:
-                cej_intersections.append((px, py))
+            if abs(py - cej_y) <= 5:
+                cej_curve_points.append((int(px), int(py)))
 
-        if len(cej_intersections) >= 2:
-            cej_intersections.sort(key=lambda p: p[0])
-            left_point = cej_intersections[0]
-            right_point = cej_intersections[-1]
-            cej_point = ((left_point[0] + right_point[0]) // 2, cej_y)
+        # 如果找到CEJ曲线点，按X坐标排序
+        if len(cej_curve_points) >= 2:
+            cej_curve_points.sort(key=lambda p: p[0])
 
-            # 计算CEJ线的切线方向
-            tangent = np.array([right_point[0] - left_point[0], right_point[1] - left_point[1]])
+            # 计算中心点
+            left_point = cej_curve_points[0]
+            right_point = cej_curve_points[-1]
+            cej_center = ((left_point[0] + right_point[0]) // 2, cej_y)
+
+            # 计算CEJ线的切线方向（使用平均方向）
+            if len(cej_curve_points) >= 3:
+                # 使用中间部分的点计算切线
+                mid_idx = len(cej_curve_points) // 2
+                p1 = cej_curve_points[max(0, mid_idx - 1)]
+                p2 = cej_curve_points[min(len(cej_curve_points) - 1, mid_idx + 1)]
+                tangent = np.array([p2[0] - p1[0], p2[1] - p1[1]], dtype=float)
+            else:
+                tangent = np.array([right_point[0] - left_point[0], right_point[1] - left_point[1]], dtype=float)
+
             tangent = tangent / (np.linalg.norm(tangent) + 1e-6)
 
             # 法线方向（垂直于切线，指向牙根）
-            cej_normal = np.array([tangent[1], -tangent[0]])
+            cej_normal = np.array([-tangent[1], tangent[0]])
 
             # 确保法线指向下方（牙根方向）
             if cej_normal[1] < 0:
                 cej_normal = -cej_normal
+
+            cej_curve = cej_curve_points
         else:
-            cej_point = (int(x + w / 2), cej_y)
+            # 使用简单的水平线作为后备
+            cej_center = (int(x + w / 2), cej_y)
+            cej_curve = [(x, cej_y), (x + w, cej_y)]
             cej_normal = np.array([0, 1])
 
-        return cej_point, cej_y, cej_normal
+        return cej_curve, cej_center, cej_normal
 
     def measure_root_depth_along_normal(self, tooth_data, cej_point, cej_normal, max_depth_mm=15):
         """
@@ -536,11 +556,11 @@ class ToothCEJAnalyzer:
         # 为每颗牙齿检测CEJ线
         print("正在检测CEJ线...")
         for i, tooth in enumerate(teeth_data):
-            cej_point, cej_y, cej_normal = self.detect_cej_line(tooth, processed)
-            tooth['cej_point'] = cej_point
-            tooth['cej_y'] = cej_y
+            cej_curve, cej_center, cej_normal = self.detect_cej_line(tooth, processed)
+            tooth['cej_curve'] = cej_curve  # CEJ曲线点列表
+            tooth['cej_point'] = cej_center  # CEJ中心点（用于深度测量）
             tooth['cej_normal'] = cej_normal
-            print(f"  牙齿 {i+1}: CEJ线位于 Y={cej_y}")
+            print(f"  牙齿 {i+1}: CEJ线包含 {len(cej_curve)} 个点，中心位于 Y={cej_center[1]}")
 
         # 测量每颗牙齿的根部深度
         print("正在测量牙根深度...")
@@ -623,13 +643,17 @@ class ToothCEJAnalyzer:
             color = tuple(np.random.randint(100, 255, 3).tolist())
             cv2.drawContours(original_image, [contour], -1, color, 2)
 
-            # 绘制CEJ线
+            # 绘制CEJ线（作为曲线）
+            cej_curve = tooth['cej_curve']
             cej_point = tooth['cej_point']
-            cej_y = tooth['cej_y']
-            x, y, w, h = tooth['bbox']
 
-            # CEJ线水平标记
-            ax1.plot([x, x + w], [cej_y, cej_y], 'b--', linewidth=2, alpha=0.7)
+            if len(cej_curve) >= 2:
+                # 将CEJ曲线点转换为数组用于绘图
+                cej_x = [p[0] for p in cej_curve]
+                cej_y = [p[1] for p in cej_curve]
+                ax1.plot(cej_x, cej_y, 'b-', linewidth=3, alpha=0.8, label=f'CEJ {i+1}' if i == 0 else '')
+
+            # 绘制CEJ中心点
             ax1.plot(cej_point[0], cej_point[1], 'ro', markersize=8)
 
             # 标注牙齿编号

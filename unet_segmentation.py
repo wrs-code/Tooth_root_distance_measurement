@@ -108,6 +108,7 @@ class UNetTeethSegmentation:
     def refine_mask(self, mask):
         """
         使用形态学操作细化掩码
+        参考开源仓库的CCA_Analysis后处理流程
 
         参数:
             mask: 二值掩码
@@ -115,13 +116,25 @@ class UNetTeethSegmentation:
         返回:
             refined: 细化后的掩码
         """
-        # 形态学开运算去除小噪声
-        kernel_open = np.ones((3, 3), np.uint8)
-        opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open, iterations=2)
+        # 确保mask是uint8类型
+        if mask.dtype != np.uint8:
+            mask = mask.astype(np.uint8)
 
-        # 形态学闭运算填充小孔
-        kernel_close = np.ones((5, 5), np.uint8)
-        closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel_close, iterations=2)
+        # 1. 形态学开运算去除小噪声（使用5x5核）
+        kernel = np.ones((5, 5), np.uint8)
+        opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+
+        # 2. 应用锐化滤波器增强边缘
+        kernel_sharpening = np.array([[-1, -1, -1],
+                                       [-1,  9, -1],
+                                       [-1, -1, -1]])
+        sharpened = cv2.filter2D(opened, -1, kernel_sharpening)
+
+        # 3. 轻微腐蚀以分离相邻牙齿
+        eroded = cv2.erode(sharpened, kernel, iterations=1)
+
+        # 4. 形态学闭运算填充小孔
+        closed = cv2.morphologyEx(eroded, cv2.MORPH_CLOSE, kernel, iterations=1)
 
         return closed
 
