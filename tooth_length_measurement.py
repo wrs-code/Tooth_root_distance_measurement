@@ -456,7 +456,69 @@ class ToothLengthMeasurement:
             json.dump(axes_data, f, indent=2, ensure_ascii=False)
         print(f"✓ 轴位置数据已保存: {json_path}")
 
+        # 5. 保存轴数据到CSV
+        csv_path = self.export_to_csv(teeth_data, output_dir, base_name)
+        print(f"✓ CSV数据已保存: {csv_path}")
+
         return result_image, teeth_data
+
+    def export_to_csv(self, teeth_data, output_dir, base_name):
+        """
+        导出牙齿测量数据到CSV文件
+
+        参数:
+            teeth_data: 牙齿数据列表
+            output_dir: 输出目录
+            base_name: 基础文件名
+
+        返回:
+            csv_path: CSV文件路径
+        """
+        import csv
+
+        csv_path = os.path.join(output_dir, f'{base_name}_tooth_measurements.csv')
+
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+
+            # 写入表头
+            writer.writerow([
+                'Tooth_ID',
+                'Center_X',
+                'Center_Y',
+                'Long_Axis_Length_mm',
+                'Long_Axis_Start_X',
+                'Long_Axis_Start_Y',
+                'Long_Axis_End_X',
+                'Long_Axis_End_Y',
+                'Short_Axis_Length_mm',
+                'Short_Axis_Start_X',
+                'Short_Axis_Start_Y',
+                'Short_Axis_End_X',
+                'Short_Axis_End_Y',
+                'Area_pixels'
+            ])
+
+            # 写入每颗牙齿的数据
+            for tooth in teeth_data:
+                writer.writerow([
+                    tooth['id'],
+                    tooth['center'][0],
+                    tooth['center'][1],
+                    round(tooth['long_axis']['length_mm'], 2),
+                    round(tooth['long_axis']['start'][0], 1),
+                    round(tooth['long_axis']['start'][1], 1),
+                    round(tooth['long_axis']['end'][0], 1),
+                    round(tooth['long_axis']['end'][1], 1),
+                    round(tooth['short_axis']['length_mm'], 2),
+                    round(tooth['short_axis']['start'][0], 1),
+                    round(tooth['short_axis']['start'][1], 1),
+                    round(tooth['short_axis']['end'][0], 1),
+                    round(tooth['short_axis']['end'][1], 1),
+                    tooth['area']
+                ])
+
+        return csv_path
 
     def process_input_folder(self, input_folder='input', output_folder='output'):
         """
