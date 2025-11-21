@@ -36,30 +36,35 @@
 
 ```
 Tooth_root_distance_measurement/
-├── Instance_seg_teeth/          # 克隆的Instance_seg_teeth仓库（参考）
-├── test_instance_seg_teeth/     # 牙齿实例分割模块 ⭐ NEW
-│   ├── unet_model.py           # U-Net模型定义
-│   ├── teeth_segmentation.py  # 分割主类
-│   ├── demo.py                 # 演示脚本
-│   ├── download_models.py      # 模型下载工具
-│   ├── README.md              # 模块文档
-│   └── MODEL_DOWNLOAD.md      # 模型下载说明
-├── teeth_analysis/             # 原有牙齿分割模块
-│   ├── core/                   # 核心功能
-│   ├── pipeline/               # 流水线
-│   └── visualization/          # 可视化
-├── test/                       # 测试和演示脚本
-│   ├── test_instance_seg_teeth.py  # 实例分割测试 ⭐ NEW
-│   ├── simple_demo.py         # 简单演示
-│   ├── advanced_demo.py       # 高级演示
-│   └── batch_demo.py          # 批量处理演示
-├── models/                     # 模型文件
-├── input/                      # 输入图像
-├── output/                     # 输出结果
-├── example_usage.py           # 使用示例
-├── requirements.txt           # 项目依赖
-├── INSTANCE_SEG_INTEGRATION.md  # 实例分割集成说明 ⭐ NEW
-└── README.md                  # 本文件
+├── Instance_seg_teeth/          # Instance_seg_teeth仓库（用于牙齿实例分割） ⭐ NEW
+│   ├── notebooks/               # 训练和测试 Jupyter notebooks
+│   │   ├── yolov8/             # YOLOv8 训练
+│   │   ├── Unet/               # U-Net 训练
+│   │   └── yolov8+unet/        # OralBBNet 训练
+│   └── Dataset/                # 数据集处理代码
+├── test_instance_seg_teeth/     # 牙齿实例分割推理模块 ⭐ NEW
+│   ├── __init__.py             # 模块初始化
+│   ├── inference.py            # 推理核心（调用Instance_seg_teeth）
+│   ├── simple_demo.py          # 简单调用示例
+│   ├── batch_demo.py           # 批量处理示例
+│   └── README.md               # 模块文档
+├── teeth_analysis/              # U-Net语义分割模块
+│   ├── core/                    # 核心功能
+│   ├── pipeline/                # 流水线
+│   └── visualization/           # 可视化
+├── test/                        # 测试和演示脚本
+│   ├── simple_demo.py          # U-Net语义分割简单演示
+│   ├── advanced_demo.py        # U-Net语义分割高级演示
+│   └── batch_demo.py           # U-Net语义分割批量处理
+├── models/                      # 模型文件目录
+│   ├── dental_xray_seg.h5      # U-Net模型（语义分割）
+│   ├── yolov8_teeth.pt         # YOLOv8模型（实例分割用）
+│   └── unet_teeth.h5           # U-Net模型（实例分割用）
+├── input/                       # 输入图像
+├── output/                      # 输出结果
+├── example_usage.py            # 使用示例
+├── requirements.txt            # 项目依赖
+└── README.md                   # 本文件
 ```
 
 ## 开发计划
@@ -114,20 +119,21 @@ results = pipeline.analyze_image('input/107.png', output_dir='output')
 #### 方案B: 使用OralBBNet实例分割（高精度）⭐ 推荐
 
 ```bash
-# 1. 下载基础模型（用于测试）
-python test_instance_seg_teeth/download_models.py
+# 1. 训练模型（参考Instance_seg_teeth仓库）
+# - YOLOv8: Instance_seg_teeth/notebooks/yolov8/yolov8_train.ipynb
+# - U-Net: Instance_seg_teeth/notebooks/yolov8+unet/yolov8+unet_training.ipynb
 
-# 2. 运行实例分割测试
-python test/test_instance_seg_teeth.py
+# 2. 运行简单示例
+python test_instance_seg_teeth/simple_demo.py
 
 # 或使用Python代码
 python -c "
-from test_instance_seg_teeth import TeethSegmentation
-segmentor = TeethSegmentation(
-    yolo_model_path='models/yolov8_base.pt',
+from test_instance_seg_teeth import InstanceSegmentationPipeline
+pipeline = InstanceSegmentationPipeline(
+    yolo_model_path='models/yolov8_teeth.pt',
     unet_model_path='models/unet_teeth.h5'
 )
-pred_mask = segmentor.segment('input/107.png')
+results = pipeline.segment_image('input/107.png', output_dir='output')
 "
 ```
 
@@ -137,9 +143,9 @@ pred_mask = segmentor.segment('input/107.png')
 
 ### 5. 详细文档
 
-- **实例分割集成说明**: [INSTANCE_SEG_INTEGRATION.md](INSTANCE_SEG_INTEGRATION.md)
-- **测试脚本说明**: [test/README.md](test/README.md)
-- **模块文档**: [test_instance_seg_teeth/README.md](test_instance_seg_teeth/README.md)
+- **实例分割模块**: [test_instance_seg_teeth/README.md](test_instance_seg_teeth/README.md)
+- **U-Net语义分割**: [test/README.md](test/README.md)
+- **Instance_seg_teeth仓库**: [Instance_seg_teeth/README.md](Instance_seg_teeth/README.md)
 
 ## 参考资料
 

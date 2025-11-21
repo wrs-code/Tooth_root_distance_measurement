@@ -4,32 +4,7 @@
 
 ## 📁 文件说明
 
-### 1. test_instance_seg_teeth.py - 牙齿实例分割测试 (NEW!)
-**适用对象**: 需要高精度牙齿实例分割的用户
-
-**技术方案**: OralBBNet (YOLOv8 + U-Net)
-- 基于Instance_seg_teeth仓库
-- 使用YOLOv8进行牙齿检测
-- 使用U-Net进行精细分割
-- 在UFBA-425数据集上达到89.34% Dice系数
-
-**包含示例**:
-- 单张图像实例分割
-- 批量图像处理
-- 环境和依赖检查
-- 可视化结果
-
-**运行方式**:
-```bash
-cd /path/to/Tooth_root_distance_measurement
-python test/test_instance_seg_teeth.py
-```
-
-**注意**: 需要先下载/训练模型，详见 `test_instance_seg_teeth/MODEL_DOWNLOAD.md`
-
----
-
-### 2. simple_demo.py - 简单调用示例
+### 1. simple_demo.py - 简单调用示例
 **适用对象**: 初学者、快速上手
 
 **包含示例**:
@@ -43,7 +18,7 @@ cd /path/to/Tooth_root_distance_measurement
 python test/simple_demo.py
 ```
 
-### 3. advanced_demo.py - 高级调用示例
+### 2. advanced_demo.py - 高级调用示例
 **适用对象**: 高级用户、需要精细控制处理流程
 
 **包含示例**:
@@ -58,7 +33,7 @@ cd /path/to/Tooth_root_distance_measurement
 python test/advanced_demo.py
 ```
 
-### 4. batch_demo.py - 批量处理示例
+### 3. batch_demo.py - 批量处理示例
 **适用对象**: 需要处理大量图像的用户
 
 **包含示例**:

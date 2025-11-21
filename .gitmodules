@@ -1,0 +1,3 @@
+[submodule "Instance_seg_teeth"]
+	path = Instance_seg_teeth
+	url = https://github.com/devichand579/Instance_seg_teeth.git
