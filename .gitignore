@@ -1,16 +1,17 @@
 # 输出文件夹
 output/
 
+# Python虚拟环境
+venv/
+env/
+ENV/
+.venv
+
 # Python缓存
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-
-# 虚拟环境
-venv/
-env/
-ENV/
 
 # IDE
 .vscode/
