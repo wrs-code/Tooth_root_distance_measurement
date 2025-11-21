@@ -137,12 +137,11 @@ class TeethSegmentationPipeline:
         print("正在进行牙齿分割...")
         results = self.segment_teeth(image)
 
-        teeth_count = len(results['teeth_data'])
-        print(f"✓ 检测到 {teeth_count} 颗牙齿")
-
-        if teeth_count == 0:
-            print("❌ 未检测到牙齿")
+        if len(results['teeth_data']) == 0:
+            print("❌ 未检测到牙齿轮廓")
             return None
+
+        print(f"✓ 牙齿分割完成")
 
         # 3. 可视化并保存结果
         print("正在生成可视化...")
@@ -239,24 +238,17 @@ class TeethSegmentationPipeline:
         report_lines.append("=" * 80)
         report_lines.append("")
 
-        total_teeth = 0
-
         for result in all_results:
             image_name = os.path.basename(result['image_path'])
-            teeth_count = len(result['teeth_data'])
-
-            total_teeth += teeth_count
-
             report_lines.append(f"图像: {image_name}")
-            report_lines.append(f"  检测到牙齿数量: {teeth_count}")
+            report_lines.append(f"  状态: 分割完成")
             report_lines.append("")
 
         report_lines.append("=" * 80)
         report_lines.append("总体统计")
         report_lines.append("=" * 80)
         report_lines.append(f"处理图像数: {len(all_results)}")
-        report_lines.append(f"检测牙齿总数: {total_teeth}")
-        report_lines.append(f"平均每张图像牙齿数: {total_teeth / len(all_results):.1f}")
+        report_lines.append(f"成功分割: {len(all_results)}")
         report_lines.append("=" * 80)
 
         # 打印到控制台
@@ -308,7 +300,7 @@ def main():
     print()
     print("功能说明：")
     print("1. 使用U-Net深度学习模型进行牙齿分割")
-    print("2. 自动检测全景X光片中的每颗牙齿")
+    print("2. 提取牙齿轮廓和形态学特征")
     print("3. 与开源仓库完全一致的后处理流程")
     print("4. 生成可视化结果和汇总报告")
     print()

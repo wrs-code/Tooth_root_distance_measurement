@@ -102,7 +102,7 @@ class TeethVisualizer:
 
         return result_image
 
-    def create_comparison_figure(self, original, mask, result, teeth_count):
+    def create_comparison_figure(self, original, mask, result):
         """
         创建对比图：原图 | 掩码 | 结果
 
@@ -110,7 +110,6 @@ class TeethVisualizer:
             original: 原始图像
             mask: 分割掩码
             result: 结果图像
-            teeth_count: 检测到的牙齿数量
 
         返回:
             fig: matplotlib图形对象
@@ -132,7 +131,7 @@ class TeethVisualizer:
 
         # 检测结果
         axes[2].imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
-        axes[2].set_title(f'牙齿轮廓检测 (检测到 {teeth_count} 颗)', fontsize=14, fontweight='bold')
+        axes[2].set_title('牙齿轮廓检测', fontsize=14, fontweight='bold')
         axes[2].axis('off')
 
         plt.tight_layout()
@@ -175,8 +174,7 @@ class TeethVisualizer:
         fig = self.create_comparison_figure(
             original_image,
             mask,
-            result_image,
-            len(teeth_data)
+            result_image
         )
 
         # 保存结果

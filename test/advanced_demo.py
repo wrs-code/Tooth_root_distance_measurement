@@ -87,9 +87,9 @@ def demo_step_by_step():
     print(f"✓ 结果已保存")
 
     # ========== 打印详细信息 ==========
-    print("\n牙齿详细信息：")
+    print("\n牙齿轮廓信息：")
     for i, tooth in enumerate(teeth_data, 1):
-        print(f"  牙齿 {i}:")
+        print(f"  轮廓 {i}:")
         print(f"    - 面积: {tooth['area']:.0f} 像素")
         print(f"    - 中心: ({tooth['centroid'][0]:.1f}, {tooth['centroid'][1]:.1f})")
         print(f"    - 边界框: {tooth['bbox']}")
@@ -134,7 +134,7 @@ def demo_custom_parameters():
     )
     teeth_data = detector.extract_teeth_from_mask(refined_mask)
 
-    print(f"\n✓ 检测到 {len(teeth_data)} 颗牙齿")
+    print(f"\n✓ 牙齿分割完成")
 
     # 保存结果
     visualizer.visualize_segmentation_result(
@@ -173,7 +173,7 @@ def demo_compare_parameters():
         )
         teeth_data = detector.extract_teeth_from_mask(refined_mask)
 
-        print(f"  腐蚀次数={erode}: 检测到 {len(teeth_data)} 颗牙齿")
+        print(f"  腐蚀次数={erode}: 轮廓数量 {len(teeth_data)}")
 
         # 保存结果
         visualizer.visualize_segmentation_result(

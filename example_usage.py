@@ -22,7 +22,7 @@ def example1_simple_usage():
     results = pipeline.analyze_image('input/107.png', output_dir='output')
 
     if results:
-        print(f"\n分析完成！检测到 {len(results['teeth_data'])} 颗牙齿")
+        print(f"\n分析完成！")
 
 
 def example2_batch_processing():
@@ -60,7 +60,7 @@ def example3_adjust_erosion():
     results = pipeline.analyze_image('input/107.png', output_dir='output_erosion2')
 
     if results:
-        print(f"\n分析完成！检测到 {len(results['teeth_data'])} 颗牙齿")
+        print(f"\n分析完成！")
 
 
 def example4_custom_parameters():
@@ -81,7 +81,7 @@ def example4_custom_parameters():
     results = pipeline.analyze_image('input/107.png', output_dir='output_custom')
 
     if results:
-        print(f"\n分析完成！检测到 {len(results['teeth_data'])} 颗牙齿")
+        print(f"\n分析完成！")
 
 
 def example5_advanced_usage():
@@ -125,7 +125,7 @@ def example5_advanced_usage():
         'output/advanced_result.png'
     )
 
-    print(f"\n完成！检测到 {len(teeth_data)} 颗牙齿")
+    print(f"\n完成！")
 
 
 def main():

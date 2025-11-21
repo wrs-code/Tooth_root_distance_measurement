@@ -75,7 +75,7 @@ results = pipeline.analyze_image('input/image.png', output_dir='output')
 
 # 查看结果
 if results:
-    print(f"检测到 {len(results['teeth_data'])} 颗牙齿")
+    print("分割完成")
 ```
 
 ## 📖 代码结构说明
@@ -140,8 +140,8 @@ from teeth_analysis import TeethSegmentationPipeline
 pipeline = TeethSegmentationPipeline(
     model_path='models/dental_xray_seg.h5',
     open_iteration=3,      # 开运算次数（去噪）
-    erode_iteration=2,     # 腐蚀次数（分离牙齿）
-    min_area=3000          # 最小面积阈值
+    erode_iteration=2,     # 腐蚀次数（分离轮廓）
+    min_area=3000          # 最小轮廓面积阈值
 )
 
 results = pipeline.analyze_image('input/image.png', output_dir='output')
@@ -161,11 +161,11 @@ results = pipeline.segment_teeth(image)
 # 访问各种数据
 binary_mask = results['binary_mask']      # 二值掩码
 refined_mask = results['refined_mask']    # 细化掩码
-teeth_data = results['teeth_data']        # 牙齿信息列表
+teeth_data = results['teeth_data']        # 牙齿轮廓数据列表
 
 # 自定义处理
-for tooth in teeth_data:
-    print(f"面积: {tooth['area']}, 中心: {tooth['centroid']}")
+for contour_data in teeth_data:
+    print(f"面积: {contour_data['area']}, 中心: {contour_data['centroid']}")
 ```
 
 ### 场景5：使用独立模块（完全自定义流程）
@@ -203,14 +203,14 @@ visualizer.visualize_segmentation_result(image, refined_mask, teeth_data, 'outpu
 |------|--------|------|
 | `model_path` | `'models/dental_xray_seg.h5'` | U-Net模型文件路径 |
 | `open_iteration` | `2` | 开运算迭代次数（去噪） |
-| `erode_iteration` | `1` | 腐蚀迭代次数（分离牙齿） |
-| `min_area` | `2000` | 最小牙齿面积阈值（像素） |
+| `erode_iteration` | `1` | 腐蚀迭代次数（分离轮廓） |
+| `min_area` | `2000` | 最小轮廓面积阈值（像素） |
 
 ### 参数调整建议
 
-- **牙齿分离不够**：增加 `erode_iteration`（如 2 或 3）
+- **轮廓分离不够**：增加 `erode_iteration`（如 2 或 3）
 - **检测到太多噪声**：增加 `open_iteration` 或 `min_area`
-- **丢失小牙齿**：减少 `min_area`
+- **丢失小轮廓**：减少 `min_area`
 
 ## 📊 输出说明
 
@@ -221,10 +221,10 @@ results = {
     'image_path': str,           # 原图像路径
     'binary_mask': np.ndarray,   # 二值掩码 (H, W)
     'refined_mask': np.ndarray,  # 细化掩码 (H, W)
-    'teeth_data': [              # 牙齿数据列表
+    'teeth_data': [              # 牙齿轮廓数据列表
         {
             'contour': np.ndarray,      # 轮廓点坐标
-            'area': float,              # 面积
+            'area': float,              # 轮廓面积
             'centroid': tuple,          # 中心点 (x, y)
             'bbox': tuple,              # 边界框 (x, y, w, h)
             'perimeter': float          # 周长
@@ -259,7 +259,7 @@ FileNotFoundError: [Errno 2] No such file or directory: 'models/dental_xray_seg.
 ```
 **解决方案**：确保 `models/dental_xray_seg.h5` 文件存在
 
-### 问题3：未检测到牙齿
+### 问题3：未检测到轮廓
 **解决方案**：尝试调整参数：
 ```python
 pipeline = TeethSegmentationPipeline(

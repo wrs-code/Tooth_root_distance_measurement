@@ -41,11 +41,6 @@ def demo_batch_process_simple():
     print(f"\n处理完成！")
     print(f"  成功处理: {len(results)} 张图像")
 
-    # 统计总的牙齿数
-    total_teeth = sum(len(r['teeth_data']) for r in results)
-    print(f"  检测牙齿总数: {total_teeth}")
-    print(f"  平均每张: {total_teeth/len(results):.1f} 颗")
-
 
 def demo_batch_process_custom():
     """
@@ -79,7 +74,7 @@ def demo_batch_process_custom():
 
         if result:
             results.append(result)
-            print(f"  ✓ 检测到 {len(result['teeth_data'])} 颗牙齿")
+            print(f"  ✓ 分割完成")
         else:
             print(f"  ✗ 处理失败")
 
@@ -123,7 +118,7 @@ def demo_batch_with_timing():
         processing_times.append(img_time)
 
         if result:
-            print(f"  检测到 {len(result['teeth_data'])} 颗牙齿")
+            print(f"  分割完成")
             print(f"  处理耗时: {img_time:.2f} 秒")
 
     total_time = time.time() - total_start
@@ -168,11 +163,11 @@ def demo_batch_with_error_handling():
 
             if result and len(result['teeth_data']) > 0:
                 success_count += 1
-                print(f"  ✓ 成功 - 检测到 {len(result['teeth_data'])} 颗牙齿")
+                print(f"  ✓ 成功 - 分割完成")
             else:
                 fail_count += 1
                 failed_files.append(image_path)
-                print(f"  ✗ 失败 - 未检测到牙齿")
+                print(f"  ✗ 失败 - 未检测到轮廓")
 
         except Exception as e:
             fail_count += 1
@@ -210,10 +205,10 @@ def demo_batch_with_filtering():
     os.makedirs(output_dir, exist_ok=True)
 
     # 设置过滤条件
-    MIN_TEETH_COUNT = 10  # 最少牙齿数
-    MAX_TEETH_COUNT = 40  # 最多牙齿数
+    MIN_CONTOUR_COUNT = 10  # 最少轮廓数
+    MAX_CONTOUR_COUNT = 40  # 最多轮廓数
 
-    print(f"过滤条件: 牙齿数在 {MIN_TEETH_COUNT}-{MAX_TEETH_COUNT} 之间")
+    print(f"过滤条件: 轮廓数在 {MIN_CONTOUR_COUNT}-{MAX_CONTOUR_COUNT} 之间")
 
     valid_results = []
     invalid_results = []
@@ -224,22 +219,22 @@ def demo_batch_with_filtering():
         result = pipeline.analyze_image(image_path, output_dir)
 
         if result:
-            teeth_count = len(result['teeth_data'])
-            print(f"  检测到 {teeth_count} 颗牙齿", end="")
+            contour_count = len(result['teeth_data'])
+            print(f"  轮廓数量 {contour_count}", end="")
 
             # 检查是否满足条件
-            if MIN_TEETH_COUNT <= teeth_count <= MAX_TEETH_COUNT:
+            if MIN_CONTOUR_COUNT <= contour_count <= MAX_CONTOUR_COUNT:
                 valid_results.append({
                     'path': image_path,
-                    'count': teeth_count,
+                    'count': contour_count,
                     'result': result
                 })
                 print(" - ✓ 有效")
             else:
                 invalid_results.append({
                     'path': image_path,
-                    'count': teeth_count,
-                    'reason': '牙齿数超出范围'
+                    'count': contour_count,
+                    'reason': '轮廓数超出范围'
                 })
                 print(" - ✗ 无效（超出范围）")
 
@@ -253,12 +248,12 @@ def demo_batch_with_filtering():
     if valid_results:
         print(f"\n有效图像：")
         for r in valid_results:
-            print(f"  {os.path.basename(r['path'])}: {r['count']} 颗牙齿")
+            print(f"  {os.path.basename(r['path'])}: {r['count']} 个轮廓")
 
     if invalid_results:
         print(f"\n无效图像：")
         for r in invalid_results:
-            print(f"  {os.path.basename(r['path'])}: {r['count']} 颗牙齿 ({r['reason']})")
+            print(f"  {os.path.basename(r['path'])}: {r['count']} 个轮廓 ({r['reason']})")
 
 
 def main():

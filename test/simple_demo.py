@@ -38,15 +38,13 @@ def demo_basic_usage():
 
     # 步骤3：查看结果
     if results:
-        teeth_count = len(results['teeth_data'])
         print(f"\n✓ 分析完成！")
-        print(f"  检测到 {teeth_count} 颗牙齿")
         print(f"  结果已保存到: output/image_comparison.png")
 
-        # 打印每颗牙齿的信息
-        print(f"\n牙齿详细信息：")
+        # 打印牙齿轮廓信息
+        print(f"\n牙齿轮廓信息：")
         for i, tooth in enumerate(results['teeth_data'], 1):
-            print(f"  牙齿 {i}: 面积={tooth['area']:.0f}, "
+            print(f"  轮廓 {i}: 面积={tooth['area']:.0f}, "
                   f"中心=({tooth['centroid'][0]:.1f}, {tooth['centroid'][1]:.1f})")
     else:
         print("\n❌ 分析失败")
@@ -95,12 +93,12 @@ def demo_get_mask_data():
     # 获取各种数据
     binary_mask = results['binary_mask']      # 二值化掩码
     refined_mask = results['refined_mask']    # 细化后的掩码
-    teeth_data = results['teeth_data']        # 牙齿数据列表
+    teeth_data = results['teeth_data']        # 牙齿轮廓数据列表
 
     print(f"\n获取到的数据：")
     print(f"  二值掩码尺寸: {binary_mask.shape}")
     print(f"  细化掩码尺寸: {refined_mask.shape}")
-    print(f"  检测到牙齿数: {len(teeth_data)}")
+    print(f"  轮廓数据数量: {len(teeth_data)}")
 
     # 可以对掩码进行自定义处理
     # 例如：保存掩码图像
