@@ -6,6 +6,14 @@ scipy>=1.5.0
 
 # 深度学习依赖
 tensorflow>=2.8.0
+keras>=2.10.0
 
-# 可选依赖
+# 目标检测（用于牙齿分割）
+ultralytics>=8.0.28
+
+# 图像处理
 Pillow>=8.0.0
+scikit-image>=0.19.0
+
+# 系统监控（可选）
+psutil>=5.8.0
